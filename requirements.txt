@@ -3,6 +3,7 @@ nbconvert>=7          # requis par la vérification nbconvert --execute
 nbclient>=0.10
 nbformat>=5
 numpy>=1.26
+scipy>=1.10        # requis par aloepri/key_matrix.py (null_space)
 torch>=2.3          # CPU suffit en local
 transformers>=4.51
 safetensors>=0.4
