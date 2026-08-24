@@ -84,7 +84,8 @@ def _remap_token_ids(holder, permutation):
 
 def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
                              lam=0.3, beta=8, gamma=1e3, zeta=1e3,
-                             rope_scaling=None):
+                             rope_scaling=None, obfuscate_attention=True,
+                             apply_permutation=True):
     """Applique l'obfuscation aux poids d'un modèle déjà chargé.
 
     Séparé de `transform_model` pour être testable sur un Qwen2 miniature
@@ -101,6 +102,14 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
     une RMSNorm de tête. Auto = `False` quand la couche expose `q_norm`,
     `True` sinon (Qwen2.5 et antérieurs). Voir la docstring de
     `attention_obfuscation.py` et `check_arch.py`.
+
+    Variantes de l'arc d'attaques (Task 2) :
+    - `obfuscate_attention=False` : la boucle d'attention est sautée — les
+      poids q/k/v/o (et biais) restent intacts ; le FFN est toujours obfusqué.
+    - `apply_permutation=False` : l'embedding/lm_head gardent l'ordre clair
+      des lignes (le bruit α est conservé), la permutation retournée est
+      l'identité et les token_ids spéciaux ne sont pas remappés.
+    Les défauts `True`/`True` préservent le comportement historique.
     """
     # Vérifications obligatoires (risques identifiés dans la spec).
     assert hasattr(config, "num_key_value_heads"), (
@@ -135,7 +144,7 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
         )
     emb = obfuscate_embedding(
         w_embed, w_head, alpha_e, alpha_h, lam, h=0, seed=seed,
-        apply_key_matrices=False,
+        apply_key_matrices=False, apply_permutation=apply_permutation,
     )
     _write(model.get_input_embeddings().weight, emb.w_embed_obf)
     if not tied:
@@ -155,30 +164,31 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
         if hasattr(attn, "q_norm"):
             print(f"[obfuscation] couche {i} : q_norm/k_norm détectés, "
                   f"rope_scaling = {layer_rope_scaling}")
-        obf_attn = obfuscate_attention_layer(
-            attn.q_proj.weight.data.float(), attn.k_proj.weight.data.float(),
-            attn.v_proj.weight.data.float(), attn.o_proj.weight.data.float(),
-            num_heads=num_heads, num_kv_heads=num_kv_heads, d_head=d_head,
-            # graines distinctes par couche ET par module (le brouillon du plan
-            # faisait collisionner le FFN de la couche i avec l'attention de la
-            # couche i+1, qui auraient partagé le même flux aléatoire).
-            beta=beta, gamma=gamma, zeta=zeta, seed=seed * 10000 + 2 * i,
-            b_q=None if attn.q_proj.bias is None else attn.q_proj.bias.data.float(),
-            b_k=None if attn.k_proj.bias is None else attn.k_proj.bias.data.float(),
-            b_v=None if attn.v_proj.bias is None else attn.v_proj.bias.data.float(),
-            # Qwen2/Qwen3 appliquent RoPE via `rotate_half` : paires (i, i+d_head/2).
-            rope_layout="half",
-            rope_scaling=layer_rope_scaling,
-        )
-        _write(attn.q_proj.weight, obf_attn.w_q_obf)
-        _write(attn.k_proj.weight, obf_attn.w_k_obf)
-        _write(attn.v_proj.weight, obf_attn.w_v_obf)
-        _write(attn.o_proj.weight, obf_attn.w_o_obf)
-        for proj, b_obf in ((attn.q_proj, obf_attn.b_q_obf),
-                            (attn.k_proj, obf_attn.b_k_obf),
-                            (attn.v_proj, obf_attn.b_v_obf)):
-            if b_obf is not None:
-                _write(proj.bias, b_obf)
+        if obfuscate_attention:
+            obf_attn = obfuscate_attention_layer(
+                attn.q_proj.weight.data.float(), attn.k_proj.weight.data.float(),
+                attn.v_proj.weight.data.float(), attn.o_proj.weight.data.float(),
+                num_heads=num_heads, num_kv_heads=num_kv_heads, d_head=d_head,
+                # graines distinctes par couche ET par module (le brouillon du plan
+                # faisait collisionner le FFN de la couche i avec l'attention de la
+                # couche i+1, qui auraient partagé le même flux aléatoire).
+                beta=beta, gamma=gamma, zeta=zeta, seed=seed * 10000 + 2 * i,
+                b_q=None if attn.q_proj.bias is None else attn.q_proj.bias.data.float(),
+                b_k=None if attn.k_proj.bias is None else attn.k_proj.bias.data.float(),
+                b_v=None if attn.v_proj.bias is None else attn.v_proj.bias.data.float(),
+                # Qwen2/Qwen3 appliquent RoPE via `rotate_half` : paires (i, i+d_head/2).
+                rope_layout="half",
+                rope_scaling=layer_rope_scaling,
+            )
+            _write(attn.q_proj.weight, obf_attn.w_q_obf)
+            _write(attn.k_proj.weight, obf_attn.w_k_obf)
+            _write(attn.v_proj.weight, obf_attn.w_v_obf)
+            _write(attn.o_proj.weight, obf_attn.w_o_obf)
+            for proj, b_obf in ((attn.q_proj, obf_attn.b_q_obf),
+                                (attn.k_proj, obf_attn.b_k_obf),
+                                (attn.v_proj, obf_attn.b_v_obf)):
+                if b_obf is not None:
+                    _write(proj.bias, b_obf)
 
         mlp = layer.mlp
         obf_ffn = obfuscate_ffn_layer(
@@ -191,8 +201,11 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
 
     # IDs spéciaux : ils sont sauvegardés avec le modèle et doivent donc vivre
     # dans le même espace que ce que le modèle émet, c.-à-d. l'espace permuté.
-    _remap_token_ids(model.config, emb.permutation)
-    _remap_token_ids(getattr(model, "generation_config", None), emb.permutation)
+    # Sans permutation, ils restent en clair (aucun remappage).
+    if apply_permutation:
+        _remap_token_ids(model.config, emb.permutation)
+        _remap_token_ids(getattr(model, "generation_config", None),
+                         emb.permutation)
 
     return ObfuscationKeys(emb.permutation, emb.unpermute, seed)
 

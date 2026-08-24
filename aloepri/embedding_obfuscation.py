@@ -34,7 +34,7 @@ class ObfuscatedEmbedding:
 
 
 def obfuscate_embedding(w_embed, w_head, alpha_e, alpha_h, lam, h, seed,
-                        apply_key_matrices=True):
+                        apply_key_matrices=True, apply_permutation=True):
     vocab_size, d = w_embed.shape
     assert w_head.shape == (vocab_size, d)
 
@@ -83,7 +83,16 @@ def obfuscate_embedding(w_embed, w_head, alpha_e, alpha_h, lam, h, seed,
         # n'a pas d'importance mathématiquement.)
         w_head_star = w_head_star @ q_hat_head.T
 
-    w_embed_obf = w_embed_star[inv_perm_index]
-    w_head_obf = w_head_star[inv_perm_index]
+    if apply_permutation:
+        w_embed_obf = w_embed_star[inv_perm_index]
+        w_head_obf = w_head_star[inv_perm_index]
+    else:
+        # Variante sans permutation (arc d'attaques) : les lignes gardent
+        # l'ordre clair — le bruit α est conservé, la permutation retournée
+        # est l'identité.
+        w_embed_obf = w_embed_star
+        w_head_obf = w_head_star
+        permutation = {i: i for i in range(vocab_size)}
+        unpermute = dict(permutation)
 
     return ObfuscatedEmbedding(w_embed_obf, w_head_obf, permutation, unpermute)

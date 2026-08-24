@@ -140,12 +140,16 @@ class _ConfigLike:
 
 
 def obfuscate_layer_tensors(config, i, tensors, seed, beta=8, gamma=1e3,
-                            zeta=1e3, rope_scaling=True):
+                            zeta=1e3, rope_scaling=True,
+                            obfuscate_attention=True):
     """Obfusque les poids d'une couche (dict nom -> tenseur bf16).
 
     Gère les biais q/k/v s'ils sont présents (Qwen2) ou absents (Qwen3).
     Retourne le dict des tenseurs obfusqués en bf16 (sans les normes, qui
-    passent telles quelles côté appelant)."""
+    passent telles quelles côté appelant).
+
+    Variante d'arc d'attaques : `obfuscate_attention=False` laisse les poids
+    d'attention tels quels (le FFN est toujours obfusqué)."""
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
     d_head = config.head_dim or config.hidden_size // num_heads
@@ -158,40 +162,52 @@ def obfuscate_layer_tensors(config, i, tensors, seed, beta=8, gamma=1e3,
             return tensors[name].float()
         return None
 
-    obf_attn = obfuscate_attention_layer(
-        tensors[f"{attn}.q_proj.weight"].float(),
-        tensors[f"{attn}.k_proj.weight"].float(),
-        tensors[f"{attn}.v_proj.weight"].float(),
-        tensors[f"{attn}.o_proj.weight"].float(),
-        num_heads=num_heads, num_kv_heads=num_kv_heads, d_head=d_head,
-        beta=beta, gamma=gamma, zeta=zeta, seed=seed * 10000 + 2 * i,
-        b_q=_bias(f"{attn}.q_proj.bias"),
-        b_k=_bias(f"{attn}.k_proj.bias"),
-        b_v=_bias(f"{attn}.v_proj.bias"),
-        rope_layout="half", rope_scaling=rope_scaling,
-    )
+    out = {}
+    if obfuscate_attention:
+        obf_attn = obfuscate_attention_layer(
+            tensors[f"{attn}.q_proj.weight"].float(),
+            tensors[f"{attn}.k_proj.weight"].float(),
+            tensors[f"{attn}.v_proj.weight"].float(),
+            tensors[f"{attn}.o_proj.weight"].float(),
+            num_heads=num_heads, num_kv_heads=num_kv_heads, d_head=d_head,
+            beta=beta, gamma=gamma, zeta=zeta, seed=seed * 10000 + 2 * i,
+            b_q=_bias(f"{attn}.q_proj.bias"),
+            b_k=_bias(f"{attn}.k_proj.bias"),
+            b_v=_bias(f"{attn}.v_proj.bias"),
+            rope_layout="half", rope_scaling=rope_scaling,
+        )
+        out.update({
+            f"{attn}.q_proj.weight": obf_attn.w_q_obf.to(torch.bfloat16),
+            f"{attn}.k_proj.weight": obf_attn.w_k_obf.to(torch.bfloat16),
+            f"{attn}.v_proj.weight": obf_attn.w_v_obf.to(torch.bfloat16),
+            f"{attn}.o_proj.weight": obf_attn.w_o_obf.to(torch.bfloat16),
+        })
+        if obf_attn.b_q_obf is not None:
+            out[f"{attn}.q_proj.bias"] = obf_attn.b_q_obf.to(torch.bfloat16)
+        if obf_attn.b_k_obf is not None:
+            out[f"{attn}.k_proj.bias"] = obf_attn.b_k_obf.to(torch.bfloat16)
+        if obf_attn.b_v_obf is not None:
+            out[f"{attn}.v_proj.bias"] = obf_attn.b_v_obf.to(torch.bfloat16)
+    else:
+        # variante sans obfuscation d'attention : les poids passent tels quels
+        for name in (f"{attn}.q_proj.weight", f"{attn}.k_proj.weight",
+                     f"{attn}.v_proj.weight", f"{attn}.o_proj.weight",
+                     f"{attn}.q_proj.bias", f"{attn}.k_proj.bias",
+                     f"{attn}.v_proj.bias"):
+            if name in tensors:
+                out[name] = tensors[name]
+
     obf_ffn = obfuscate_ffn_layer(
         tensors[f"{mlp}.gate_proj.weight"].float(),
         tensors[f"{mlp}.up_proj.weight"].float(),
         tensors[f"{mlp}.down_proj.weight"].float(),
         seed=seed * 10000 + 2 * i + 1,
     )
-
-    out = {
-        f"{attn}.q_proj.weight": obf_attn.w_q_obf.to(torch.bfloat16),
-        f"{attn}.k_proj.weight": obf_attn.w_k_obf.to(torch.bfloat16),
-        f"{attn}.v_proj.weight": obf_attn.w_v_obf.to(torch.bfloat16),
-        f"{attn}.o_proj.weight": obf_attn.w_o_obf.to(torch.bfloat16),
+    out.update({
         f"{mlp}.gate_proj.weight": obf_ffn.gate_proj_obf.to(torch.bfloat16),
         f"{mlp}.up_proj.weight": obf_ffn.up_proj_obf.to(torch.bfloat16),
         f"{mlp}.down_proj.weight": obf_ffn.down_proj_obf.to(torch.bfloat16),
-    }
-    if obf_attn.b_q_obf is not None:
-        out[f"{attn}.q_proj.bias"] = obf_attn.b_q_obf.to(torch.bfloat16)
-    if obf_attn.b_k_obf is not None:
-        out[f"{attn}.k_proj.bias"] = obf_attn.b_k_obf.to(torch.bfloat16)
-    if obf_attn.b_v_obf is not None:
-        out[f"{attn}.v_proj.bias"] = obf_attn.b_v_obf.to(torch.bfloat16)
+    })
     return out
 
 
@@ -253,7 +269,17 @@ def _read_tensor(source_dir, shard, name):
 def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
                         lam=0.3, beta=8, gamma=1e3, zeta=1e3,
                         keys_path="obfuscation_keys.json", rope_scaling="auto",
-                        chunk_rows=8192, shard_target_bytes=1.5e9):
+                        chunk_rows=8192, shard_target_bytes=1.5e9,
+                        obfuscate_attention=True, apply_permutation=True):
+    """Transforme le modèle en streaming (cf. docstring du module).
+
+    Variantes de l'arc d'attaques (Task 2) :
+    - `obfuscate_attention=False` : les couches sont écrites avec leurs poids
+      d'attention intacts (le FFN reste obfusqué) ;
+    - `apply_permutation=False` : les tables embed/head gardent l'ordre clair
+      des lignes (bruit α conservé), la permutation retournée est l'identité
+      et les token_ids spéciaux ne sont pas remappés.
+    Les défauts `True`/`True` préservent le comportement historique."""
     source_dir, _ = _resolve_source(model_name)
 
     with open(os.path.join(source_dir, "config.json")) as f:
@@ -287,8 +313,15 @@ def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
 
     # --- embedding / unembedding (chunké, séquentiel : une table à la fois
     # pour borner la RAM : src float32 2,5 Go + sortie bf16 1,2 Go) ---
-    permutation, unpermute, perm_index = _vocab_permutation(
-        seed, config_dict["vocab_size"])
+    if apply_permutation:
+        permutation, unpermute, perm_index = _vocab_permutation(
+            seed, config_dict["vocab_size"])
+    else:
+        # variante sans permutation : les tables gardent l'ordre clair
+        # (le bruit α est conservé) — la permutation retournée est l'identité.
+        permutation = {i: i for i in range(config_dict["vocab_size"])}
+        unpermute = dict(permutation)
+        perm_index = torch.arange(config_dict["vocab_size"])
     embed_t = _read_tensor(source_dir, weight_map["model.embed_tokens.weight"],
                            "model.embed_tokens.weight")
     w_embed_obf, sigma_e = _obfuscate_table(
@@ -325,7 +358,8 @@ def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
                     out = obfuscate_layer_tensors(
                         _ConfigLike(config_dict), i, layer_in, seed,
                         beta=beta, gamma=gamma, zeta=zeta,
-                        rope_scaling=use_rope_scaling)
+                        rope_scaling=use_rope_scaling,
+                        obfuscate_attention=obfuscate_attention)
                     writer.add(out)
                     progressed = True
                     break
@@ -364,14 +398,17 @@ def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
         json.dump({"metadata": {"total_size": writer.total_bytes},
                    "weight_map": writer.weight_map}, f)
 
-    # --- config / generation_config : IDs spéciaux dans l'espace permuté ---
+    # --- config / generation_config : IDs spéciaux dans l'espace permuté
+    # (remappage seulement si la permutation est active ; sinon copie à
+    # l'identique, l'espace clair est conservé) ---
     for fname in ("config.json", "generation_config.json"):
         src = os.path.join(source_dir, fname)
         if not os.path.exists(src):
             continue
         with open(src) as f:
             holder = json.load(f)
-        _remap_dict_token_ids(holder, permutation)
+        if apply_permutation:
+            _remap_dict_token_ids(holder, permutation)
         with open(os.path.join(output_dir, fname), "w") as f:
             json.dump(holder, f, indent=2)
 
