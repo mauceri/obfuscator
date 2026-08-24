@@ -61,6 +61,13 @@ client : elles ne sont ni poussées (voir `.gitignore`) ni transmises à Modal
 (`serve()` ne monte aucun volume clés et ne charge aucun tokenizer ;
 l'attaquant ISA n'a que les poids obfusqués, sans la clé de permutation).
 
+Le secret API `aloepri-api-key` est **requis** (fail-closed) : le créer avant
+de déployer le service avec
+`~/modal-venv/bin/modal secret create aloepri-api-key ALOEPRI_API_KEY=<valeur>`
+(la même valeur que le fichier `~/.aloepri-api-key` côté client). Sans ce
+secret, `serve()` refuse **toutes** les requêtes : `/generate` et `/health`
+renvoient 401.
+
 ## Coûts Modal
 
 - Transform CPU : ~30-60 min (Qwen3-8B) ; variantes Qwen3-0.6B : quelques

@@ -24,7 +24,7 @@ côté client). Le taux mesure donc la récupération de l'entrée « modèle »
 et la comparaison baseline vs obfusqué mesure l'effet de l'obfuscation.
 
 Usage (module) :
-    from isa_attack import attack_model_channel, token_match_rate
+    from .isa_attack import run_channel_attack, token_match_rate
 """
 import argparse
 import random
@@ -129,10 +129,6 @@ def attack_model(model, embed_table, target_state, seq_len, channel,
             if step % 50 == 0:
                 print(f"  [isa] phase2 {step}/{phase2_steps} "
                       f"loss {losses[-1]:.4f} (rel.)", flush=True)
-
-    with torch.no_grad():
-        ids = logits.argmax(dim=-1)
-    return ids, losses
 
     with torch.no_grad():
         ids = logits.argmax(dim=-1)

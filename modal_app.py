@@ -197,7 +197,14 @@ def verify(
         "seed": seed,
     }
 
-    if rope_scaling == "auto":
+    # bool strict — même conversion que transform_streaming : une chaîne
+    # "off"/"on" ne doit pas être truthy (verify(rope_scaling="off") doit
+    # désactiver Ĥ exactement comme transform(rope_scaling="off")).
+    if rope_scaling == "on":
+        rope_scaling = True
+    elif rope_scaling == "off":
+        rope_scaling = False
+    else:
         rope_scaling = (src_cfg.get("model_type") not in
                         ("qwen3", "qwen3_moe"))
 
@@ -270,7 +277,7 @@ def serve():
     retournée."""
     import torch
     from fastapi import FastAPI, Header, HTTPException
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
     from transformers import AutoModelForCausalLM
 
     model_dir = os.path.join(MODELS_DIR, MODEL_SUBDIR)
@@ -282,7 +289,9 @@ def serve():
 
     class GenerateRequest(BaseModel):
         input_ids: list[int]
-        max_new_tokens: int = 100
+        # max_new_tokens borné (1..2048) : pas de décodage infini ni de
+        # valeurs absurdes côté client.
+        max_new_tokens: int = Field(default=100, ge=1, le=2048)
         repetition_penalty: float = 1.0
         bad_words_ids: list[list[int]] | None = None
 
@@ -290,12 +299,12 @@ def serve():
         output_ids: list[int]
 
     def _authorized(authorization: str | None) -> bool:
-        # Les valeurs du Secret Modal sont injectées comme variables
-        # d'environnement dans le conteneur (pas de `.get()` sur l'objet
-        # Secret dans ce SDK). Pas de secret monté → pas d'authentification.
+        # Fail-closed : sans clé attendue configurée (env `ALOEPRI_API_KEY`
+        # du Secret Modal `aloepri-api-key`), AUCUNE requête n'est acceptée —
+        # le Secret est requis, cf. README (posture de sécurité).
         expected = os.environ.get("ALOEPRI_API_KEY")
         if not expected:
-            return True
+            return False
         return authorization == f"Bearer {expected}"
 
     @fastapi_app.get("/health")
@@ -317,7 +326,8 @@ def serve():
             kwargs["bad_words_ids"] = req.bad_words_ids
         with torch.no_grad():
             output = model.generate(
-                input_tensor, max_new_tokens=req.max_new_tokens,
+                input_tensor,
+                max_new_tokens=min(req.max_new_tokens, 2048),  # clamp défensif
                 do_sample=False, **kwargs,
             )
         return GenerateResponse(output_ids=output[0].tolist())
