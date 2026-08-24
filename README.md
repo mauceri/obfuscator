@@ -75,6 +75,20 @@ renvoient 401.
 - Attaques ISA : A100-40GB, ~1,5-2 $/h, quelques minutes par variante.
 - Service : L4, ~0,80 $/h, facturé au temps GPU allumé (scale-to-zero).
 
+
+## Correctif Qwen3 (2026-08-24)
+
+Les RMSNorm de tête `q_norm`/`k_norm` de Qwen3 portent un γ appris **non
+constant** qui ne commute pas avec les rotations/permutations denses de
+`head_dim` (R̂/Ẑ) : `γ ⊙ (R̂·x) ≠ R̂·(γ ⊙ x)`. Le round-trip logits des vrais
+Qwen3 était cassé (corr 0,35) et la génération dégénérait en charabia — les
+modèles jouets (γ=1) et Qwen2.5 (pas de q_norm) masquaient le défaut. Depuis
+le commit `9f6355e`, `rope_rotation=False` est automatique sous `q_norm` :
+R̂/Ẑ = identité ; restent exacts les permutations de têtes, Û_vo (v/o), la
+permutation de vocabulaire et le FFN. La défense d'attention se réduit alors
+au mélange de têtes + Û_vo — la **permutation de vocabulaire reste la
+protection effective du texte**.
+
 ## Liens spec / plan
 
 - [Spec](docs/superpowers/specs/2026-08-24-aloepri-notebook-design.md)
