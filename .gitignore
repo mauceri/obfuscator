@@ -1,1 +1,13 @@
 .worktrees/
+
+# Secrets et artefacts (ne JAMAIS pousser)
+obfuscation_keys*.json
+artifacts/
+*.shard
+# Notebooks
+.ipynb_checkpoints/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
