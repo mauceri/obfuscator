@@ -97,7 +97,8 @@ au-delà de l'installation.
 - [ ] **Step 1: requirements.txt**
 
 ```txt
-jupyter>=7
+jupyter>=1.0          # méta-package : plafonne à 1.1.1 (ruling 2026-08-24)
+nbconvert>=7          # requis par la vérification nbconvert --execute
 nbclient>=0.10
 nbformat>=5
 numpy>=1.26
