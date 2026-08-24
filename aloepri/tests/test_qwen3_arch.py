@@ -221,3 +221,34 @@ def test_embedding_chunked_matches_reference_math():
     assert torch.equal(got_h, ref_h)
     assert perm == {i: permuted[i] for i in range(vocab)}
     assert unperm == {v: k for k, v in enumerate(permuted)}
+
+
+def test_tiny_qwen3_nonconstant_gamma_roundtrip():
+    """Régression Qwen3 : le γ appris des RMSNorm de tête (non constant sur les
+    vrais modèles) ne commute pas avec les rotations/permutations denses R̂/Ẑ.
+    Avec rope_rotation=False (auto sur q_norm), le round-trip redevient exact."""
+    torch.manual_seed(7)
+    model, config = _tiny_qwen3(seed=7)
+    # γ non constant, comme sur un modèle entraîné (k_norm très étalé)
+    torch.manual_seed(42)
+    with torch.no_grad():
+        for layer in model.model.layers:
+            qn = layer.self_attn.q_norm.weight
+            kn = layer.self_attn.k_norm.weight
+            qn.copy_(torch.randn_like(qn) * 2 + 1)
+            kn.copy_(torch.rand_like(kn) * 10 + 0.01)
+    clear_ids = torch.tensor([[1, 7, 13, 42, 5, 60]])
+    with torch.no_grad():
+        baseline = model(clear_ids).logits
+    keys = obfuscate_model_in_place(
+        model, config, seed=3, alpha_e=0.0, alpha_h=0.0, beta=1,
+        rope_scaling=None,
+    )
+    permuted = torch.tensor(
+        [[keys.vocab_permutation[int(t)] for t in clear_ids[0]]])
+    with torch.no_grad():
+        obfuscated = model(permuted).logits
+    cols = torch.tensor(
+        [keys.vocab_permutation[t] for t in range(config.vocab_size)])
+    err = (obfuscated[..., cols] - baseline).abs().max().item() / baseline.abs().max().item()
+    assert err < 1e-3, f"round-trip Qwen3 (γ non constant) cassé : {err}"

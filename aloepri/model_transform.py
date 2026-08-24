@@ -157,13 +157,17 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
     for i, layer in enumerate(model.model.layers):
         attn = layer.self_attn
         # Qwen3 et suivants : q_norm/k_norm (RMSNorm de tête) entre la
-        # projection et RoPE → seul le régime sans Ĥ reste exact (cf.
-        # docstring d'`obfuscate_attention_layer`).
+        # projection et RoPE → seuls les régimes sans Ĥ et sans R̂/Ẑ restent
+        # exacts (le γ appris de la RMSNorm ne commute pas avec les rotations/
+        # permutations denses de la dimension de tête — cf. docstring
+        # d'`obfuscate_attention_layer`).
         layer_rope_scaling = (rope_scaling if rope_scaling is not None
                               else not hasattr(attn, "q_norm"))
+        layer_rope_rotation = not hasattr(attn, "q_norm")
         if hasattr(attn, "q_norm"):
             print(f"[obfuscation] couche {i} : q_norm/k_norm détectés, "
-                  f"rope_scaling = {layer_rope_scaling}")
+                  f"rope_scaling = {layer_rope_scaling}, "
+                  f"rope_rotation = {layer_rope_rotation}")
         if obfuscate_attention:
             obf_attn = obfuscate_attention_layer(
                 attn.q_proj.weight.data.float(), attn.k_proj.weight.data.float(),
@@ -179,6 +183,7 @@ def obfuscate_model_in_place(model, config, seed, alpha_e=1.0, alpha_h=0.2,
                 # Qwen2/Qwen3 appliquent RoPE via `rotate_half` : paires (i, i+d_head/2).
                 rope_layout="half",
                 rope_scaling=layer_rope_scaling,
+                rope_rotation=layer_rope_rotation,
             )
             _write(attn.q_proj.weight, obf_attn.w_q_obf)
             _write(attn.k_proj.weight, obf_attn.w_k_obf)

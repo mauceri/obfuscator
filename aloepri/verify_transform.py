@@ -30,8 +30,8 @@ import torch
 from safetensors import safe_open
 
 from .transform_streaming import (  # noqa: E402
-    _ATTR_TENSORS, _ConfigLike, _PASSTHROUGH_SUFFIXES, _vocab_permutation,
-    obfuscate_layer_tensors,
+    _ATTR_TENSORS, _ConfigLike, _PASSTHROUGH_SUFFIXES, _Q_NORM_TYPES,
+    _vocab_permutation, obfuscate_layer_tensors,
 )
 
 
@@ -148,7 +148,8 @@ def check_layers(model_dir, src_dir, keys, count, beta, gamma, zeta,
             in_t[name] = _read_tensor(src_dir, wm_src, name)
         expected = obfuscate_layer_tensors(
             _ConfigLike(cfg), i, in_t, seed, beta=beta, gamma=gamma,
-            zeta=zeta, rope_scaling=rope_scaling)
+            zeta=zeta, rope_scaling=rope_scaling,
+            rope_rotation=cfg.get("model_type") not in _Q_NORM_TYPES)
         for name, exp in expected.items():
             got = _read_tensor(model_dir, wm_out, name)
             if not torch.equal(exp, got):

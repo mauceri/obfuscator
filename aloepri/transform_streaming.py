@@ -140,7 +140,7 @@ class _ConfigLike:
 
 
 def obfuscate_layer_tensors(config, i, tensors, seed, beta=8, gamma=1e3,
-                            zeta=1e3, rope_scaling=True,
+                            zeta=1e3, rope_scaling=True, rope_rotation=True,
                             obfuscate_attention=True):
     """Obfusque les poids d'une couche (dict nom -> tenseur bf16).
 
@@ -175,6 +175,7 @@ def obfuscate_layer_tensors(config, i, tensors, seed, beta=8, gamma=1e3,
             b_k=_bias(f"{attn}.k_proj.bias"),
             b_v=_bias(f"{attn}.v_proj.bias"),
             rope_layout="half", rope_scaling=rope_scaling,
+            rope_rotation=rope_rotation,
         )
         out.update({
             f"{attn}.q_proj.weight": obf_attn.w_q_obf.to(torch.bfloat16),
@@ -292,8 +293,12 @@ def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
         use_rope_scaling = False
     else:
         use_rope_scaling = config_type not in _Q_NORM_TYPES
+    # R̂/Ẑ (rotations/permutations denses de head_dim) : idem — le γ appris des
+    # RMSNorm de tête Qwen3 ne commute pas avec eux (cf. attention_obfuscation).
+    use_rope_rotation = config_type not in _Q_NORM_TYPES
     print(f"[streaming] model_type={config_type}, rope_scaling="
-          f"{'on' if use_rope_scaling else 'off'}")
+          f"{'on' if use_rope_scaling else 'off'}, "
+          f"rope_rotation={use_rope_rotation}")
 
     num_heads = config_dict["num_attention_heads"]
     num_kv_heads = config_dict["num_key_value_heads"]
@@ -359,6 +364,7 @@ def transform_streaming(model_name, output_dir, seed, alpha_e=1.0, alpha_h=0.2,
                         _ConfigLike(config_dict), i, layer_in, seed,
                         beta=beta, gamma=gamma, zeta=zeta,
                         rope_scaling=use_rope_scaling,
+                        rope_rotation=use_rope_rotation,
                         obfuscate_attention=obfuscate_attention)
                     writer.add(out)
                     progressed = True
