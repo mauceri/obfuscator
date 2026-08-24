@@ -15,24 +15,58 @@ Modal pour les étapes lourdes. Dépôt autonome : zéro dépendance à Secretar
   ```
 
 - CLI Modal (`~/modal-venv/bin/modal setup`) — uniquement pour les étapes
-  lourdes sur Modal (transform GPU, export, service).
+  lourdes sur Modal (transform, export, service, attaques ISA).
 
-## Lancement du notebook
+## Vérification headless (RUN_HEAVY=False)
+
+Sans authentification Modal, le notebook s'exécute de bout en bout : sections
+0-1 complètes, sections 2-5 en branches « sauté » (aucun appel Modal), la
+cellule stub 6.2 lève volontairement `NotImplementedError` — tolérée par le
+tag nbformat `raises-exception`. Commande (depuis la racine du dépôt) :
 
 ```bash
-.venv/bin/jupyter notebook
+.venv/bin/jupyter nbconvert --to notebook --execute \
+  --ExecutePreprocessor.timeout=300 notebooks/aloepri_procedure.ipynb \
+  --output /tmp/aloepri_check.ipynb
 ```
+
+Attendu : exit 0, aucune exception (hors la cellule stub marquée).
+
+## Exécution complète (RUN_HEAVY=True)
+
+1. Passer `RUN_HEAVY = True` dans la cellule setup du notebook.
+2. Authentifier la CLI : `~/modal-venv/bin/modal token new` (ou
+   `~/modal-venv/bin/modal setup`).
+3. Lancer Jupyter **depuis la racine du dépôt** :
+
+   ```bash
+   .venv/bin/jupyter notebook notebooks/aloepri_procedure.ipynb
+   ```
+
+   puis exécuter les cellules dans l'ordre (ou relancer la commande nbconvert
+   ci-dessus avec `RUN_HEAVY=True`).
+
+Le run complet : transform du modèle (~16 Go, ~30-60 min CPU Modal),
+vérification bit-à-bit, récupération puis **suppression** du volume clés,
+déploiement du service, tests de base (section 4, décodage validé), attaques
+ISA de l'arc complet (section 5, ~1-2 h A100-40GB). Les clés sont
+téléchargées dans `artifacts/obfuscation_keys.json` (gitignoré) puis le
+volume clés Modal est supprimé. La section 6 (matrices clés P̂/Q̂, h>0) est
+réservée : cellule stub « à implémenter ».
 
 ## Posture de sécurité
 
 Les clés d'obfuscation (`obfuscation_keys*.json`) ne quittent **jamais** le
-client : elles ne sont ni poussées (voir `.gitignore`) ni transmises à Modal.
+client : elles ne sont ni poussées (voir `.gitignore`) ni transmises à Modal
+(`serve()` ne monte aucun volume clés et ne charge aucun tokenizer ;
+l'attaquant ISA n'a que les poids obfusqués, sans la clé de permutation).
 
 ## Coûts Modal
 
-- Transform CPU : ~30-60 min
-- A100-40GB : ~1,5-2 $/h
-- L4 : ~0,80 $/h
+- Transform CPU : ~30-60 min (Qwen3-8B) ; variantes Qwen3-0.6B : quelques
+  minutes.
+- Attaques ISA : A100-40GB, ~1,5-2 $/h, quelques minutes par variante.
+- Service : L4, ~0,80 $/h, facturé au temps GPU allumé (scale-to-zero).
 
 ## Liens spec / plan
 
