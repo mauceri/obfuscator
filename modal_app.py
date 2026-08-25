@@ -517,3 +517,97 @@ def attention_inversion(
     }
     print("RESULTAT_INVERSION " + json.dumps(result), flush=True)
     return result
+
+
+@app.function(image=TRANSFORM_IMAGE,
+              volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def vma_attack(subset_size: int = 2000, seed: int = 0):
+    """VMA (Appendice D) sur le modèle 8B réel du Volume.
+
+    L'attaquant (= opérateur du serveur) a les poids obfusqués du Volume et
+    le modèle de base PUBLIC (Qwen3-8B). Il apparie les lignes de la table
+    d'embedding obfusquée aux lignes de la table claire par plus proche
+    voisin (cosinus) → récupère la permutation de vocabulaire Π, sans aucune
+    clé. La vérité terrain (perm) est régénérée par seed UNIQUEMENT pour
+    MESURER la récupération.
+
+    Variante RowSort (mécanisme du papier, pour éliminer une permutation de
+    colonnes Z2) mesurée aussi. Diagnostic : cosinus du vrai match vs meilleur
+    faux match — interprète le taux de récupération."""
+    import json
+    import random
+    import sys as _sys
+    import urllib.request
+
+    import torch
+    from safetensors import safe_open
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from vma_attack import run_vma
+
+    model_dir = os.path.join(MODELS_DIR, MODEL_SUBDIR)
+    obf_embed = None
+    for fname in sorted(os.listdir(model_dir)):
+        if not fname.endswith(".safetensors"):
+            continue
+        with safe_open(os.path.join(model_dir, fname), framework="pt") as fp:
+            if "model.embed_tokens.weight" in fp.keys():
+                obf_embed = fp.get_tensor(
+                    "model.embed_tokens.weight").float().cpu()
+                break
+    assert obf_embed is not None, \
+        "model.embed_tokens.weight introuvable sur le Volume"
+
+    # table claire : SEUL le shard contenant embed_tokens (léger vs 16 Go)
+    idx_url = f"https://huggingface.co/{SRC_MODEL}/resolve/main/" \
+              "model.safetensors.index.json"
+    import json as _json
+    with urllib.request.urlopen(idx_url) as r:
+        index = _json.loads(r.read().decode())
+    shard = index["weight_map"]["model.embed_tokens.weight"]
+    from huggingface_hub import hf_hub_download
+    clear_path = hf_hub_download(SRC_MODEL, shard)
+    with safe_open(clear_path, framework="pt") as fp:
+        clear_embed = fp.get_tensor("model.embed_tokens.weight").float()
+    assert obf_embed.shape == clear_embed.shape, \
+        (obf_embed.shape, clear_embed.shape)
+
+    # vérité terrain : permutation régénérée par seed (même tirage que la
+    # transform — `random.Random(seed).shuffle`)
+    V = obf_embed.shape[0]
+    rng_py = random.Random(seed)
+    permuted_ids = list(range(V))
+    rng_py.shuffle(permuted_ids)
+    perm = dict(zip(range(V), permuted_ids))
+
+    rate_cos, n = run_vma(obf_embed, clear_embed, perm,
+                          subset_size=subset_size, seed=seed)
+    rate_sort, _ = run_vma(obf_embed, clear_embed, perm,
+                           subset_size=subset_size, seed=seed,
+                           use_row_sort=True)
+
+    # diagnostic : cosinus du vrai match vs meilleur faux match (sur le
+    # sous-ensemble, table claire complète)
+    torch.manual_seed(seed)
+    clear_tokens = torch.randperm(V)[:subset_size]
+    obf_rows = obf_embed[torch.tensor([perm[int(t)] for t in
+                                       clear_tokens.tolist()])].float()
+    q = torch.nn.functional.normalize(obf_rows, dim=1)
+    t = torch.nn.functional.normalize(clear_embed, dim=1)
+    sim = q @ t.t()                                  # (N, V)
+    true_cos = sim[torch.arange(subset_size), clear_tokens].mean().item()
+    sim[torch.arange(subset_size), clear_tokens] = float("-inf")
+    best_false_cos = sim.max(dim=1).values.mean().item()
+
+    result = {
+        "modele": MODEL_SUBDIR,
+        "taille_table": V,
+        "subset_size": n,
+        "taux_recuperation_cosinus_direct": round(rate_cos, 4),
+        "taux_recuperation_row_sort": round(rate_sort, 4),
+        "cos_vrai_match_moyen": round(true_cos, 4),
+        "cos_meilleur_faux_match_moyen": round(best_false_cos, 4),
+    }
+    print("RESULTAT_VMA " + json.dumps(result), flush=True)
+    return result

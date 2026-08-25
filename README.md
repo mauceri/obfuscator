@@ -87,7 +87,10 @@ le commit `9f6355e`, `rope_rotation=False` est automatique sous `q_norm` :
 R̂/Ẑ = identité ; restent exacts les permutations de têtes, Û_vo (v/o), la
 permutation de vocabulaire et le FFN. La défense d'attention se réduit alors
 au mélange de têtes + Û_vo — la **permutation de vocabulaire reste la
-protection effective du texte**.
+protection effective du texte** (contre ISA ; **mais pas contre VMA** — un
+attaquant ayant le modèle public récupère Π à ~100 % depuis la table
+d'embedding, cf. `artifacts/vma_report.md` : la vraie défense du papier est
+les matrices clés h>0, non implémentées ici).
 
 ## Liens spec / plan
 
