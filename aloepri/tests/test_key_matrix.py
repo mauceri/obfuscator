@@ -54,7 +54,8 @@ def test_sampling_scale_matches_paper():
     blind to the *scale* used to sample V, E1, E2, F1, F2, so a wrong
     variance (e.g. a missing sqrt, or 1/sqrt(d) confused with 1/d) would not
     be caught by the invariant test above. Page 8 of the PDF states
-    E1, E2 ~ N(0, 1/d) and F1, F2 ~ N(0, 1/h) (variance parameterization).
+    E1, E2, F1, F2 ~ N(0, 1/d) (variance parameterization; la variance
+    1/h pour F était une mauvaise transcription, corrigée le 2026-08-26).
     E = E1 @ E2 and F = F1 @ F2 are already exposed on KeyMatrixBase, so we
     check their entrywise variance against the value implied by those
     constants, aggregated over many independent draws for a stable estimate.
@@ -72,7 +73,7 @@ def test_sampling_scale_matches_paper():
 
     half_h = h // 2
     expected_var_e = half_h / d**2        # Var(E1)*Var(E2) summed over h/2 terms
-    expected_var_f = half_h / h**2        # Var(F1)*Var(F2) summed over h/2 terms
+    expected_var_f = half_h / d**2        # idem F1/F2 ~ N(0, 1/d) (Algorithme 1)
 
     np.testing.assert_allclose(e_entries.var(), expected_var_e, rtol=0.2)
     np.testing.assert_allclose(f_entries.var(), expected_var_f, rtol=0.2)

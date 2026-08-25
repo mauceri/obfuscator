@@ -570,8 +570,20 @@ def vma_attack(subset_size: int = 2000, seed: int = 0):
     clear_path = hf_hub_download(SRC_MODEL, shard)
     with safe_open(clear_path, framework="pt") as fp:
         clear_embed = fp.get_tensor("model.embed_tokens.weight").float()
-    assert obf_embed.shape == clear_embed.shape, \
-        (obf_embed.shape, clear_embed.shape)
+    if obf_embed.shape != clear_embed.shape:
+        # h>0 : la table obfusquée vit en d+2h ≠ d — la VMA DIRECTE est
+        # structurellement impossible (les dimensions ne correspondent pas).
+        result = {
+            "modele": MODEL_SUBDIR,
+            "taille_table_obf": obf_embed.shape[0],
+            "dim_obf": obf_embed.shape[1],
+            "dim_claire": clear_embed.shape[1],
+            "vma_directe_possible": False,
+            "explication": "h>0 : embedding en d+2h — comparaison directe "
+                           "impossible (défense structurelle)",
+        }
+        print("RESULTAT_VMA " + json.dumps(result), flush=True)
+        return result
 
     # vérité terrain : permutation régénérée par seed (même tirage que la
     # transform — `random.Random(seed).shuffle`)
@@ -610,4 +622,171 @@ def vma_attack(subset_size: int = 2000, seed: int = 0):
         "cos_meilleur_faux_match_moyen": round(best_false_cos, 4),
     }
     print("RESULTAT_VMA " + json.dumps(result), flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, memory=49152,
+              ephemeral_disk=TRANSFORM_EPHEMERAL_DISK,
+              volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
+              timeout=10800, scaledown_window=300)
+def transform_chained(
+    seed: int = 0,
+    alpha_e: float = 0.3,
+    alpha_h: float = 0.2,
+    lam: float = 0.3,
+    h: int = 128,
+    beta: int = 8,
+    gamma: float = 1e3,
+    zeta: float = 1e3,
+    kappa_mode: str = "empirical",
+    model_name: str = SRC_MODEL,
+    out_subdir: str = "qwen3-8b-obf-h128",
+):
+    """Schéma COMPLET AloePri (h>0, §5.4) : chaînage global P̂/Q̂, d → d+2h.
+
+    Le modèle obfusqué est RECONSTRUIT avec `hidden_size = d + 2h` (le modèle
+    clair n'est pas modifié) : chaque poids de la frontière hidden est
+    transformé (embed·P̂, q/k/v/gate/up·Q̂ᵀ avec Wnorm fusionné, o/down·P̂,
+    head·Q̂ᵀ), les RMSNorm deviennent des normes à poids scalaire κ (§5.2.5,
+    κ empirique par couche par défaut — l'hypothèse gaussienne du papier
+    biaise l'échelle, mesuré sur Qwen3-0.6B).
+
+    Sortie : modèle obfusqué (hidden d+2h) sous
+    `{MODELS_DIR}/{out_subdir}` + clés sur le Volume `obfuscator-keys`.
+    Mémoire : modèle clair bf16 (~16 Go) + obfusqué bf16 (~17,5 Go) +
+    transitoires fp64 → 48 Go demandés.
+    """
+    import json
+    import sys as _sys
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from aloepri.chained_transform import obfuscate_chained
+    from transformers import AutoModelForCausalLM
+
+    clear = AutoModelForCausalLM.from_pretrained(
+        model_name, dtype=torch.bfloat16, attn_implementation="eager").eval()
+    obf, keys = obfuscate_chained(
+        clear, clear.config, seed, alpha_e=alpha_e, alpha_h=alpha_h,
+        lam=lam, h=h, beta=beta, gamma=gamma, zeta=zeta,
+        kappa_mode=kappa_mode)
+    del clear
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    out_dir = os.path.join(MODELS_DIR, out_subdir)
+    os.makedirs(out_dir, exist_ok=True)
+    obf.to(torch.bfloat16).save_pretrained(out_dir)
+
+    keys_path = os.path.join(KEYS_DIR, KEYS_FILENAME)
+    with open(keys_path, "w") as f:
+        json.dump({k: ({str(a): int(b) for a, b in v.items()}
+                       if isinstance(v, dict) else v)
+                   for k, v in keys.items()}, f)
+    models_vol.commit()
+    keys_vol.commit()
+
+    return {
+        "out_subdir": out_subdir,
+        "hidden_size": obf.config.hidden_size,
+        "seed": seed, "alpha_e": alpha_e, "alpha_h": alpha_h,
+        "lam": lam, "h": h, "beta": beta, "kappa_mode": kappa_mode,
+        "model_name": model_name,
+    }
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def verify_chained(
+    model_subdir: str = "qwen3-8b-obf-h128",
+    seed: int = 0,
+    h: int = 128,
+    n_prompts: int = 8,
+):
+    """Contrôle qualité du modèle chaîné h>0 (le round-trip est APPROXIMATIF :
+    erreur κ §5.2.5 — pas de vérification bit-à-bit).
+
+    Charge le modèle obfusqué du Volume + le modèle clair HF, compare les
+    logits (corrélation + taux top-1) sur des prompts de test, et génère
+    3 questions canoniques (capitale / 391+2 / haïku) — le gate de qualité
+    avant de servir le modèle h>0.
+    """
+    import json
+    import sys as _sys
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
+    obf = AutoModelForCausalLM.from_pretrained(
+        model_dir, dtype=torch.bfloat16,
+        attn_implementation="eager").cuda().eval()
+    clear = AutoModelForCausalLM.from_pretrained(
+        SRC_MODEL, dtype=torch.bfloat16,
+        attn_implementation="eager").cuda().eval()
+    tok = AutoTokenizer.from_pretrained(SRC_MODEL)
+
+    import random as _random
+    rng_py = _random.Random(seed)
+    permuted = list(range(clear.config.vocab_size))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(clear.config.vocab_size), permuted))
+    unperm = {v: k for k, v in perm.items()}
+
+    prompts = [
+        "La capitale de la France est",
+        "Combien font 391 + 2 ?",
+        "Écris un haïku sur la mer.",
+        "Le chat dort sur le canapé.",
+        "Quelle est la couleur du ciel ?",
+        "Raconte une courte histoire.",
+        "Qui a écrit Les Misérables ?",
+        "Traduis bonjour en anglais.",
+    ][:n_prompts]
+
+    results = []
+    with torch.no_grad():
+        for p in prompts:
+            ids = tok(p, return_tensors="pt").input_ids.cuda()
+            lc = clear(ids).logits.double()
+            p_ids = torch.tensor([[perm[int(t)] for t in ids[0]]]).cuda()
+            lo = obf(p_ids).logits.double()
+            cols = torch.tensor(
+                [perm[t] for t in range(clear.config.vocab_size)]).cuda()
+            lo_p = lo[..., cols]
+            corr = torch.stack([lo_p.flatten(), lc.flatten()]
+                               ).corrcoef()[0, 1].item()
+            top1 = float((lo_p[0, -1].argmax() == lc[0, -1].argmax()).item())
+            results.append({"prompt": p, "corr": round(corr, 4),
+                            "top1": top1})
+
+        def gen(text):
+            ids = tok(text, return_tensors="pt").input_ids.cuda()
+            p = torch.tensor([[perm[int(t)] for t in ids[0]]]).cuda()
+            out = obf.generate(
+                p, max_new_tokens=40, do_sample=False,
+                repetition_penalty=1.05,
+                bad_words_ids=[[perm[151667]]],
+                pad_token_id=tok.pad_token_id or tok.eos_token_id,
+            )[0].tolist()
+            return tok.decode([unperm.get(int(x), x) for x in out],
+                              skip_special_tokens=True)
+
+        gen_results = {
+            "capitale": gen("La capitale de la France est"),
+            "391+2": gen("Combien font 391 + 2 ?"),
+            "haiku": gen("Écris un haïku sur la mer."),
+        }
+
+    result = {
+        "model_subdir": model_subdir,
+        "hidden_size": obf.config.hidden_size,
+        "logits": results,
+        "top1_moyen": round(sum(r["top1"] for r in results) / len(results), 4),
+        "generation": gen_results,
+    }
+    print("RESULTAT_VERIFY_CHAINED " + json.dumps(result, ensure_ascii=False),
+          flush=True)
     return result

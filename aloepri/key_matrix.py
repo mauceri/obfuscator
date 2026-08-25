@@ -31,10 +31,20 @@ def _random_orthogonal(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _null_space_samples(matrix: np.ndarray, count: int, rng: np.random.Generator) -> np.ndarray:
-    """`count` random vectors drawn from null(matrix), as columns of the result."""
+    """`count` random vectors drawn from null(matrix), as columns of the result.
+
+    Chaque colonne est NORMALISÉE (norme 1) : le papier ne spécifie pas
+    l'échelle de C/D (« columns sampled from null(F^T) »), mais le remark de
+    §5.2.1 indique que λ régule la norme « avoiding significantly altering
+    the magnitude of obfuscated weights » — ce qui exige ‖P̂‖ ≈ ‖B‖ ≈ 1+λ.
+    Sans normalisation, C (d×h) a des colonnes de norme √(null dim) ≈ √(h/2)
+    → ‖x·P̂‖/‖x‖ ≈ √(h/2) (~8 à h=128) : le round-trip diverge par couches.
+    La normalisation préserve l'invariant (C·F = 0 est insensible à l'échelle).
+    """
     basis = null_space(matrix)
     coeffs = rng.normal(size=(basis.shape[1], count))
-    return basis @ coeffs
+    cols = basis @ coeffs
+    return cols / np.linalg.norm(cols, axis=0, keepdims=True)
 
 
 def init_key_matrix(d: int, h: int, lam: float, rng: np.random.Generator) -> KeyMatrixBase:
@@ -49,10 +59,17 @@ def init_key_matrix(d: int, h: int, lam: float, rng: np.random.Generator) -> Key
     E2 = rng.normal(scale=np.sqrt(1.0 / d), size=(half_h, h))
     E = E1 @ E2
 
+    # E1/E2 ~ N(0, 1/d) et F1/F2 ~ N(0, 1/d) (Algorithme 1 du papier —
+    # variance 1/d pour TOUS les blocs ; la variance 1/h était une mauvaise
+    # transcription corrigée le 2026-08-26).
+    E1 = rng.normal(scale=np.sqrt(1.0 / d), size=(d, half_h))
+    E2 = rng.normal(scale=np.sqrt(1.0 / d), size=(half_h, h))
+    E = E1 @ E2
+
     # h=0 (POC-wide simplification, see plan) collapses F1/F2 to empty
     # arrays; guard the scale division so it doesn't ZeroDivisionError on a
     # value that no sampled element will ever use.
-    f_scale = np.sqrt(1.0 / h) if h > 0 else 0.0
+    f_scale = np.sqrt(1.0 / d) if d > 0 else 0.0
     F1 = rng.normal(scale=f_scale, size=(h, half_h))
     F2 = rng.normal(scale=f_scale, size=(half_h, d))
     F = F1 @ F2
@@ -63,9 +80,18 @@ def init_key_matrix(d: int, h: int, lam: float, rng: np.random.Generator) -> Key
 
 
 def key_mat_gen(base: KeyMatrixBase) -> np.ndarray:
-    """P_hat = [B C E] Z, with C's rows sampled from null(F^T) so that C @ F = 0."""
+    """P_hat = [B C E] Z, with C's rows sampled from null(F^T) so that C @ F = 0.
+
+    Le bloc C est scalé par √(h/d) : ses lignes sont des vecteurs unitaires
+    du noyau de F^T, donc ‖C‖_F² = d → ‖x·C‖² ≈ ‖x‖² (le bloc doublerait la
+    norme de P̂, r ≈ 1.45, ce qui casse le round-trip par couches). Le scaling
+    uniforme √(h/d) ramène la contribution à E[‖x·C‖²] ≈ (h/d)·‖x‖² (équivalent
+    à h colonnes unitaires) sans sortir les lignes du noyau (invariant C·F = 0).
+    """
     d = base.B.shape[0]
+    h = base.E.shape[1]
     C = _null_space_samples(base.F.T, d, base.rng).T
+    C = C * np.sqrt(h / d)
     return np.hstack([base.B, C, base.E]) @ base.Z
 
 
