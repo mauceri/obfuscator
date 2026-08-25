@@ -416,3 +416,103 @@ def diag():
         with open(os.path.join(KEYS_DIR, KEYS_FILENAME), "rb") as f:
             print("keys sha256:",
                   hashlib.sha256(f.read()).hexdigest())
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol,
+              "/poc": modal.Volume.from_name("aloepri-models", create_if_missing=False)},
+              scaledown_window=60)
+def compare_poc():
+    """Diagnostic : compare les poids du modèle obfusqué local (obfuscator-models)
+    avec le modèle POC (aloepri-models) — même structure attendue si les
+    transformations sont identiques (seed 0, alpha_e, beta)."""
+    import json
+    import torch
+    from safetensors import safe_open
+
+    poc = "/poc/qwen3-8b-obf"
+    obf = os.path.join(MODELS_DIR, MODEL_SUBDIR)
+    idx = json.load(open(os.path.join(poc, "model.safetensors.index.json")))
+    names = [
+        "model.embed_tokens.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.self_attn.o_proj.weight",
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+        "model.layers.0.input_layernorm.weight",
+        "lm_head.weight",
+    ]
+    for name in names:
+        shard = idx["weight_map"].get(name)
+        if not shard:
+            print(f"{name}: introuvable dans l'index"); continue
+        with safe_open(os.path.join(poc, shard), framework="pt") as fp, \
+             safe_open(os.path.join(obf, shard), framework="pt") as fo:
+            p = fp.get_tensor(name); o = fo.get_tensor(name)
+        if p.shape != o.shape:
+            print(f"{name}: SHAPE {p.shape} vs {o.shape}"); continue
+        if torch.equal(p, o):
+            print(f"{name}: IDENTIQUE")
+        else:
+            d = float((p.float() - o.float()).abs().max())
+            print(f"{name}: DIFF max={d:.6g}")
+    pc = json.load(open(os.path.join(poc, "config.json")))
+    oc = json.load(open(os.path.join(obf, "config.json")))
+    print("config identiques:", pc == oc)
+
+@app.function(image=SERVE_IMAGE, scaledown_window=60)
+def serve_env():
+    """Diagnostic : versions des libs dans le conteneur serveur."""
+    import torch
+    import transformers
+    import safetensors
+    print(f"transformers={transformers.__version__}")
+    print(f"torch={torch.__version__}")
+    print(f"safetensors={safetensors.__version__}")
+
+
+@app.function(image=TRANSFORM_IMAGE, gpu="A100-40GB",
+              volumes={MODELS_DIR: models_vol},
+              timeout=3600, scaledown_window=300)
+def attention_inversion(
+    ids: str,
+    layer: int = 0,
+    steps: int = 300,
+    lr: float = 0.05,
+    seed: int = 0,
+):
+    """Attaque « clean-space » : capture les scores d'attention du modèle
+    obfusqué (serveur) puis inverse dans le modèle baseline PUBLIC (poids
+    gelés) → tokens récupérés EN CLAIR (contourne la permutation de vocabulaire).
+
+    `ids` : les ids PERMUTÉS du prompt secret (l'entrée réelle du modèle),
+    en CSV — calculés côté client avec les clés (jamais envoyées)."""
+    import sys as _sys
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from attention_inversion import run_attention_inversion
+
+    ids = [int(x) for x in ids.split(",")]
+    model_dir = os.path.join(MODELS_DIR, MODEL_SUBDIR)
+    obf = AutoModelForCausalLM.from_pretrained(
+        model_dir, dtype=torch.bfloat16,
+        attn_implementation="eager").cuda().eval()
+    clean = AutoModelForCausalLM.from_pretrained(
+        SRC_MODEL, dtype=torch.bfloat16,
+        attn_implementation="eager").cuda().eval()
+    pred, losses = run_attention_inversion(
+        obf, clean, ids, layer=layer, steps=steps, lr=lr, seed=seed,
+        device="cuda",
+    )
+    result = {
+        "layer": layer,
+        "ids_envoyes_au_modele": len(ids),
+        "ids_cles_recuperes": pred.tolist(),
+        "loss_debut": losses[0],
+        "loss_fin": losses[-1],
+    }
+    print("RESULTAT_INVERSION " + json.dumps(result), flush=True)
+    return result
