@@ -179,8 +179,12 @@ def _pi_conjugate(a, d_head):
 
 def _random_orthogonal(n, gen):
     """Tirage Haar-uniforme sur O(n) : QR d'une gaussienne + correction de
-    signe (sans quoi la loi n'est pas uniforme)."""
-    q, r = torch.linalg.qr(torch.randn(n, n, generator=gen))
+    signe (sans quoi la loi n'est pas uniforme).
+
+    fp32 explicite : le QR CPU n'est pas implémenté en bf16 (casse sous
+    `torch.set_default_dtype(bfloat16)`, utilisé par le transform h>0 8B)."""
+    q, r = torch.linalg.qr(
+        torch.randn(n, n, generator=gen, dtype=torch.float32))
     sign = torch.sign(torch.diagonal(r))
     sign[sign == 0] = 1.0
     return q * sign

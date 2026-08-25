@@ -42,7 +42,8 @@ def obfuscate_ffn_layer(gate_proj, up_proj, down_proj, seed):
 
     gen = torch.Generator().manual_seed(seed)
     # scaling strictement positif pour rester inversible sans changer de signe
-    scale = torch.exp(torch.randn(intermediate_size, generator=gen) * 0.1)
+    scale = torch.exp(torch.randn(intermediate_size, generator=gen,
+                                    dtype=torch.float32) * 0.1)
 
     gate_proj_obf = gate_proj[perm_index]
     up_proj_obf = up_proj[perm_index] * scale[perm_index].unsqueeze(1)
