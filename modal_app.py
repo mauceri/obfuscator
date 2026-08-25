@@ -522,7 +522,8 @@ def attention_inversion(
 @app.function(image=TRANSFORM_IMAGE,
               volumes={MODELS_DIR: models_vol},
               gpu="A100-40GB", timeout=3600, scaledown_window=300)
-def vma_attack(subset_size: int = 2000, seed: int = 0):
+def vma_attack(subset_size: int = 2000, seed: int = 0,
+               model_subdir: str = MODEL_SUBDIR):
     """VMA (Appendice D) sur le modèle 8B réel du Volume.
 
     L'attaquant (= opérateur du serveur) a les poids obfusqués du Volume et
@@ -546,7 +547,7 @@ def vma_attack(subset_size: int = 2000, seed: int = 0):
     _sys.path.insert(0, "/pkg/aloepri")
     from vma_attack import run_vma
 
-    model_dir = os.path.join(MODELS_DIR, MODEL_SUBDIR)
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
     obf_embed = None
     for fname in sorted(os.listdir(model_dir)):
         if not fname.endswith(".safetensors"):
@@ -574,7 +575,7 @@ def vma_attack(subset_size: int = 2000, seed: int = 0):
         # h>0 : la table obfusquée vit en d+2h ≠ d — la VMA DIRECTE est
         # structurellement impossible (les dimensions ne correspondent pas).
         result = {
-            "modele": MODEL_SUBDIR,
+            "modele": model_subdir,
             "taille_table_obf": obf_embed.shape[0],
             "dim_obf": obf_embed.shape[1],
             "dim_claire": clear_embed.shape[1],
@@ -613,7 +614,7 @@ def vma_attack(subset_size: int = 2000, seed: int = 0):
     best_false_cos = sim.max(dim=1).values.mean().item()
 
     result = {
-        "modele": MODEL_SUBDIR,
+        "modele": model_subdir,
         "taille_table": V,
         "subset_size": n,
         "taux_recuperation_cosinus_direct": round(rate_cos, 4),
