@@ -488,6 +488,7 @@ def attention_inversion(
 
     `ids` : les ids PERMUTÉS du prompt secret (l'entrée réelle du modèle),
     en CSV — calculés côté client avec les clés (jamais envoyées)."""
+    import json
     import sys as _sys
     import torch
     from transformers import AutoModelForCausalLM
