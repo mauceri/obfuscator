@@ -21,7 +21,10 @@ import random
 import torch
 import torch.nn.functional as F
 
-from .isa_attack import capture_state
+try:
+    from .isa_attack import capture_state
+except ImportError:  # import top-level (conteneur Modal : sys.path vers aloepri/)
+    from isa_attack import capture_state
 
 
 def _soft_embeds(logits, embed_table, tau):
