@@ -796,3 +796,103 @@ def verify_chained(
     print("RESULTAT_VERIFY_CHAINED " + json.dumps(result, ensure_ascii=False),
           flush=True)
     return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def vma_product_attack(
+    model_subdir: str = "qwen3-8b-obf-h128",
+    seed: int = 0,
+    subset_size: int = 2000,
+    layers: str = "0,4,8,12,16,20,24,28",
+):
+    """VMA PRODUIT (Table 9, Appendice D) sur le modèle h>0.
+
+    L'attaquant a les poids obfusqués (Volume) + le modèle public. La VMA
+    directe est impossible (d+2h ≠ d) ; les PRODUITS W̃_e·W̃_gateᵀ annulent
+    P̂/Q̂ (chaînage) et retombent dans un espace comparable ; RowSort élimine
+    la permutation FFN Ẑ_ffn ; l'appariement des lignes triées récupère Π.
+    Seul le bruit d'embedding α_e (corrélé entre couches) le défend — la
+    Table 3 du papier mesure TTRSR 25 % (Qwen3-14B) / 20 % (32B) à α_e=1.0.
+    """
+    import json
+    import random
+    import sys as _sys
+    import urllib.request
+
+    import torch
+    from safetensors import safe_open
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from vma_product import run_vma_product
+
+    layer_list = [int(x) for x in layers.split(",")]
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
+
+    def _load_from_dir(directory, names):
+        out = {}
+        for fname in sorted(os.listdir(directory)):
+            if not fname.endswith(".safetensors"):
+                continue
+            with safe_open(os.path.join(directory, fname),
+                           framework="pt") as fp:
+                for n in names:
+                    if n in fp.keys() and n not in out:
+                        out[n] = fp.get_tensor(n)
+        return out
+
+    names = (["model.embed_tokens.weight"] +
+             [f"model.layers.{i}.mlp.gate_proj.weight"
+              for i in layer_list])
+    obf_t = _load_from_dir(model_dir, names)
+    obf_embed = obf_t["model.embed_tokens.weight"].float()
+    obf_gates = [obf_t[f"model.layers.{i}.mlp.gate_proj.weight"].float()
+                 for i in layer_list]
+
+    import json as _json
+    with urllib.request.urlopen(
+            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            "model.safetensors.index.json") as r:
+        wm = _json.loads(r.read().decode())["weight_map"]
+    from huggingface_hub import hf_hub_download
+
+    clear_gates, wns = [], []
+    for i in layer_list:
+        gname = f"model.layers.{i}.mlp.gate_proj.weight"
+        wname = f"model.layers.{i}.post_attention_layernorm.weight"
+        for n in (gname, wname):
+            path = hf_hub_download(SRC_MODEL, wm[n])
+            with safe_open(path, framework="pt") as fp:
+                if n == gname:
+                    clear_gates.append(fp.get_tensor(n).float())
+                else:
+                    wns.append(fp.get_tensor(n).float())
+    path = hf_hub_download(SRC_MODEL, wm["model.embed_tokens.weight"])
+    with safe_open(path, framework="pt") as fp:
+        clear_embed = fp.get_tensor("model.embed_tokens.weight").float()
+
+    V = clear_embed.shape[0]
+    rng_py = random.Random(seed)
+    permuted_ids = list(range(V))
+    rng_py.shuffle(permuted_ids)
+    perm = dict(zip(range(V), permuted_ids))
+
+    # les tenseurs chargés par safe_open sont sur CPU : tout passe sur le GPU
+    # (les produits V×inter et les RowSort sont des centaines de fois plus
+    # rapides sur A100 — le run précédent ramait sur CPU faute de .cuda()).
+    # Grandes tables en bf16 (X clair V×inter = 3,7 Go au lieu de 7,5 Go en
+    # fp32) : le run fp32 a fait un OOM CUDA sur les 40 Go de l'A100.
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    obf_embed = obf_embed.to(dev)
+    obf_gates = [g.to(dev) for g in obf_gates]
+    clear_embed = clear_embed.to(dev)
+    clear_gates = [g.to(dev) for g in clear_gates]
+    wns = [w.to(dev) for w in wns]
+
+    res = run_vma_product(
+        obf_embed, obf_gates, clear_embed, clear_gates, wns, perm,
+        subset_size=subset_size, seed=seed, dtype=torch.bfloat16)
+    result = {"modele": model_subdir, "layers": layer_list, **res}
+    print("RESULTAT_VMA_PRODUIT "
+          + json.dumps(result, ensure_ascii=False), flush=True)
+    return result
