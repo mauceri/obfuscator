@@ -436,7 +436,8 @@ def _resolve_source(model_name):
     cache = snapshot_download(
         model_name,
         allow_patterns=["config.json", "generation_config.json",
-                        "model.safetensors.index.json", "model-*.safetensors"],
+                        "model.safetensors.index.json", "model-*.safetensors",
+                        "model.safetensors"],  # modèle mono-fichier (ex. Qwen3-0.6B)
     )
     return cache, model_name
 
