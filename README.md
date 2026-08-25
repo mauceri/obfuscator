@@ -54,6 +54,29 @@ téléchargées dans `artifacts/obfuscation_keys.json` (gitignoré) puis le
 volume clés Modal est supprimé. La section 6 (matrices clés P̂/Q̂, h>0) est
 réservée : cellule stub « à implémenter ».
 
+## Matrices clés h>0 (schéma complet, commit `aef5859`)
+
+La section 6 est maintenant implémentée (`aloepri/chained_transform.py`,
+tests `tests/test_chained_transform.py`) : chaînage global P̂/Q̂ (§5.4) avec
+reconstruction du modèle à `hidden_size = d + 2h`, Wnorm fusionnée dans les
+couches adjacentes, normes à poids scalaire κ (empirique par couche — la
+variante gaussienne du papier biaise l'échelle). Le round-trip devient
+**approximatif** (erreur κ, §5.2.5) : la vérification est un contrôle de
+qualité (`verify_chained` : corrélation logits + top-1), plus du bit-à-bit.
+
+Deux corrections à l'Algorithme 1 du papier découvertes à l'implémentation :
+(a) F1/F2 ~ N(0, 1/d) (pas 1/h) ; (b) lignes de C scalées par √(h/d) — sans
+quoi ‖xP̂‖/‖x‖ ≈ 1.45 et le round-trip diverge par couches.
+
+**Sécurité** : la VMA directe (embedding vs table claire) devient
+structurellement impossible (d+2h ≠ d) — cf. `artifacts/vma_report.md` ; le
+bruit α_e ne défend plus que la VMA produit (Table 9). **Qualité** : à
+α_e=0.3 le bruit embed casse la génération du 0.6B (marges serrées) ; le 8B
+(d=4096, plus robuste) est le juge — α à ajuster selon `verify_chained`.
+Déploiement 8B : `modal run modal_app.py::transform_chained --seed 0
+--alpha-e 0.3 --alpha-h 0.2 --h 128 --out-subdir qwen3-8b-obf-h128` puis
+`verify_chained`.
+
 ## Posture de sécurité
 
 Les clés d'obfuscation (`obfuscation_keys*.json`) ne quittent **jamais** le

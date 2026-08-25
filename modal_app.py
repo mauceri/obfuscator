@@ -667,12 +667,17 @@ def transform_chained(
 
     clear = AutoModelForCausalLM.from_pretrained(
         model_name, dtype=torch.bfloat16, attn_implementation="eager").eval()
-    obf, keys = obfuscate_chained(
-        clear, clear.config, seed, alpha_e=alpha_e, alpha_h=alpha_h,
-        lam=lam, h=h, beta=beta, gamma=gamma, zeta=zeta,
-        kappa_mode=kappa_mode)
+    # le modèle obfusqué est construit directement en bf16 (le constructeur
+    # créerait 34 Go de fp32 sinon) ; les calculs restent en fp64 explicites.
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        obf, keys = obfuscate_chained(
+            clear, clear.config, seed, alpha_e=alpha_e, alpha_h=alpha_h,
+            lam=lam, h=h, beta=beta, gamma=gamma, zeta=zeta,
+            kappa_mode=kappa_mode)
+    finally:
+        torch.set_default_dtype(torch.float32)
     del clear
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     out_dir = os.path.join(MODELS_DIR, out_subdir)
     os.makedirs(out_dir, exist_ok=True)
