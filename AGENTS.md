@@ -34,10 +34,8 @@ Les trois exigences cœur du papier :
 
 - Les instructions globales de l'utilisateur s'appliquent en priorité :
   `~/.dsh/AGENTS.md` (réfléchir avant de coder, simplicité d'abord, modifications
-  chirurgicales, exécution orientée objectif).
-- **Consigne générale : ne JAMAIS entreprendre une tâche longue (fine-tuning,
-  entraînements, runs Modal, calculs de plusieurs minutes ou plus) sans
-  demander l'accord de l'utilisateur au préalable, avec le budget estimé.**
+  chirurgicales, exécution orientée objectif, ne jamais entreprendre de tâche
+  longue sans accord préalable).
 - Communication en français ; les termes techniques (paper, APIs) restent en anglais.
 - Avant d'implémenter une brique d'AloePri, énoncer explicitement les hypothèses
   de lecture du papier et les confirmer.
