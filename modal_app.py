@@ -58,6 +58,9 @@ TRANSFORM_IMAGE = (
         "safetensors", "huggingface_hub",
     )
     .add_local_dir(_ALOEPRI_DIR, "/pkg/aloepri", copy=True)
+    .add_local_file(
+        "/home/mauceric/gen_corpus_gepa_codex/corpus_synth_clean_10000.jsonl",
+        "/corpus_gepa.jsonl")
 )
 # Image du service : transformers + serveur web, sans le package aloepri
 # (inutile ici : le serveur ne permute/dépermute rien).
@@ -895,4 +898,220 @@ def vma_product_attack(
     result = {"modele": model_subdir, "layers": layer_list, **res}
     print("RESULTAT_VMA_PRODUIT "
           + json.dumps(result, ensure_ascii=False), flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300)
+def finetune_corpus(
+    model_name: str = "Qwen/Qwen3-0.6B",
+    epochs: int = 5,
+    batch_size: int = 16,
+    seq_len: int = 128,
+    lr: float = 2e-5,
+    out_subdir: str = "qwen3-06b-ft-gepa",
+    seed: int = 0,
+):
+    """Entraînement COMPLET (fine-tuning de tous les paramètres) sur le corpus
+    GEPA (français synthétique hors distribution), GPU A100.
+
+    Objectif (spike VMA) : un vrai entraînement doit décaler les poids assez
+    pour casser la VMA produit contre la référence publique. Sortie : modèle
+    fine-tuné sur le Volume `obfuscator-models/{out_subdir}` + courbe de loss.
+    """
+    import json
+    import sys as _sys
+    import time
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # corpus
+    texts = []
+    with open("/corpus_gepa.jsonl") as f:
+        for line in f:
+            d = json.loads(line)
+            c = d.get("contenu")
+            if c and isinstance(c, str) and len(c) > 50:
+                texts.append(c)
+    print(f"[corpus] {len(texts)} textes", flush=True)
+
+    tok = AutoTokenizer.from_pretrained(model_name)
+    all_ids = []
+    for t in texts:
+        ids = tok(t, add_special_tokens=False).input_ids
+        if ids:
+            all_ids.extend(ids + [tok.eos_token_id])
+    n_seq = len(all_ids) // seq_len
+    corpus = torch.tensor(all_ids[:n_seq * seq_len]).view(n_seq, seq_len)
+    print(f"[corpus] {len(all_ids)} tokens → {n_seq} séquences de {seq_len}",
+          flush=True)
+
+    torch.manual_seed(seed)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, dtype=torch.float32).to("cuda").train()
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    steps_per_epoch = max(1, n_seq // batch_size)
+    total = epochs * steps_per_epoch
+    t0 = time.time()
+    losses = []
+    for step in range(total):
+        idx = torch.randint(0, n_seq, (batch_size,))
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            out = model(corpus[idx].cuda(), labels=corpus[idx].cuda())
+        loss = out.loss
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        losses.append(loss.item())
+        if step % 100 == 0 or step == total - 1:
+            print(f"[ft] step {step}/{total} loss={loss.item():.4f} "
+                  f"({(time.time()-t0)/60:.1f} min)", flush=True)
+
+    out_dir = os.path.join(MODELS_DIR, out_subdir)
+    model.eval().to("cpu")
+    model.save_pretrained(out_dir)
+    models_vol.commit()
+    print(f"[ft] loss début={losses[0]:.4f} fin={losses[-1]:.4f} "
+          f"min={min(losses):.4f} — {total} pas en "
+          f"{(time.time()-t0)/60:.1f} min → {out_dir}", flush=True)
+    return {
+        "out_subdir": out_subdir,
+        "steps": total,
+        "loss_debut": losses[0],
+        "loss_fin": losses[-1],
+        "loss_min": min(losses),
+        "minutes": round((time.time() - t0) / 60, 1),
+        "model_name": model_name,
+    }
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300)
+def vma_product_full(
+    model_subdir: str = "qwen3-8b-obf-h128",
+    seed: int = 0,
+    subset_size: int = 2000,
+    views: str = "gate,up",
+):
+    """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + vote.
+
+    Le maximum réalisable à V=151 936 sur A100-40GB : les vues V×inter
+    (gate, up). Les vues V×V (gram q·k, W_e·W_h) font 46 Go — infaisables ;
+    W_down·W_h porte Π sur les colonnes (RowSort détruirait l'info).
+
+    Pour chaque vue × chaque couche : produit W̃_e·W̃_gateᵀ (ou up), RowSort
+    chunké, appariement NN sur `subset_size` tokens → prédiction Π par couche.
+    Vote par vue (toutes les couches) puis vote global entre vues.
+    """
+    import json
+    import random
+    import sys as _sys
+    import urllib.request
+
+    import torch
+    from safetensors import safe_open
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from vma_product import _row_sort_chunked
+    from vma_attack import nearest_neighbor_rows
+
+    view_list = [v.strip() for v in views.split(",")]
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
+
+    def _tensors_from_dir(directory, names):
+        out = {}
+        for fname in sorted(os.listdir(directory)):
+            if not fname.endswith(".safetensors"):
+                continue
+            with safe_open(os.path.join(directory, fname),
+                           framework="pt") as fp:
+                for n in names:
+                    if n in fp.keys() and n not in out:
+                        out[n] = fp.get_tensor(n)
+        return out
+
+    # embed obfusqué + config
+    obf_t = _tensors_from_dir(model_dir, ["model.embed_tokens.weight"])
+    obf_embed = obf_t["model.embed_tokens.weight"]
+    with open(os.path.join(model_dir, "config.json")) as f:
+        n_layers = json.load(f)["num_hidden_layers"]
+
+    # embed clair + poids clairs (HF, sélectif)
+    import json as _json
+    with urllib.request.urlopen(
+            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            "model.safetensors.index.json") as r:
+        wm = _json.loads(r.read().decode())["weight_map"]
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(SRC_MODEL, wm["model.embed_tokens.weight"])
+    with safe_open(path, framework="pt") as fp:
+        clear_embed = fp.get_tensor("model.embed_tokens.weight")
+
+    V = clear_embed.shape[0]
+    rng_py = random.Random(seed)
+    permuted_ids = list(range(V))
+    rng_py.shuffle(permuted_ids)
+    perm = dict(zip(range(V), permuted_ids))
+    torch.manual_seed(seed)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    test = torch.randperm(V)[:subset_size].to(dev)
+    obf_rows_idx = torch.tensor([perm[int(t)] for t in test.tolist()]).to(dev)
+    obf_embed = obf_embed.to(dev)
+    clear_embed = clear_embed.to(dev)
+
+    # poids par couche (chargés à la volée, libérés après)
+    per_view = {v: [] for v in view_list}
+    for i in range(n_layers):
+        obf_names = [f"model.layers.{i}.mlp.gate_proj.weight",
+                     f"model.layers.{i}.mlp.up_proj.weight"]
+        obf_w = _tensors_from_dir(model_dir, obf_names)
+        clr = {}
+        for n in (f"model.layers.{i}.mlp.gate_proj.weight",
+                  f"model.layers.{i}.mlp.up_proj.weight",
+                  f"model.layers.{i}.post_attention_layernorm.weight"):
+            p = hf_hub_download(SRC_MODEL, wm[n])
+            with safe_open(p, framework="pt") as fp:
+                clr[n] = fp.get_tensor(n).to(dev)
+        wn = clr[f"model.layers.{i}.post_attention_layernorm.weight"]
+
+        for view in view_list:
+            key = f"model.layers.{i}.mlp.{view}_proj.weight"
+            g_obf = obf_w[key].to(dev)          # (inter, d2) obfusqué
+            g_clair = clr[key] * wn[None, :]    # (inter, d) + fold Wnorm
+            Y = obf_embed[obf_rows_idx] @ g_obf.t()          # (N, inter)
+            Y = _row_sort_chunked(Y)
+            X = torch.empty(V, g_clair.shape[0],
+                            dtype=torch.bfloat16, device=dev)
+            for c0 in range(0, V, 8192):
+                c1 = min(c0 + 8192, V)
+                X[c0:c1] = clear_embed[c0:c1] @ g_clair.t().to(torch.bfloat16)
+            X = _row_sort_chunked(X)
+            pred = nearest_neighbor_rows(Y, X, chunk=2048)
+            rate = float((pred == test).float().mean().item())
+            per_view[view].append(pred)
+            print(f"[vma_full] vue={view} couche {i}/{n_layers}: "
+                  f"TTRSR={rate:.1%}", flush=True)
+            del X, Y, pred
+            if dev == "cuda":
+                torch.cuda.empty_cache()
+        del obf_w, clr
+
+    # votes
+    result = {"modele": model_subdir, "vues": view_list,
+              "n_couches": n_layers, "n_tokens": len(test)}
+    all_preds = []
+    for view, preds in per_view.items():
+        vote = torch.stack(preds).mode(dim=0).values
+        rate = float((vote == test).float().mean().item())
+        result[f"vote_{view}"] = round(rate, 4)
+        all_preds.append(vote)
+    result["vote_global"] = round(float(
+        (torch.stack(all_preds).mode(dim=0).values == test)
+        .float().mean().item()), 4)
+    print("RESULTAT_VMA_FULL " + json.dumps(result), flush=True)
     return result
