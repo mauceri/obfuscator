@@ -34,6 +34,13 @@ from .transform_streaming import (  # noqa: E402
     _vocab_permutation, obfuscate_layer_tensors,
 )
 
+# Tolérance de comparaison bf16 : le modèle est stocké en bf16 (8 bits de
+# mantisse) et la recomputation passe fp32 → bf16 — un écart de 1-2 ulp
+# (~2^-11 ≈ 5e-4 pour des valeurs ~0.1) est un arrondi normal, pas une
+# erreur. Une vraie erreur (mauvaise clé, mauvais α, structure) donne des
+# écarts O(0.1-1).
+_BF16_TOL = 2e-3
+
 
 def _source_paths(source, source_dir=None):
     """Résout le répertoire source (HF cache ou local)."""
@@ -152,9 +159,10 @@ def check_layers(model_dir, src_dir, keys, count, beta, gamma, zeta,
             rope_rotation=cfg.get("model_type") not in _Q_NORM_TYPES)
         for name, exp in expected.items():
             got = _read_tensor(model_dir, wm_out, name)
-            if not torch.equal(exp, got):
-                d = (exp.float() - got.float()).abs()
-                problems.append(f"{name}: maxdiff={d.max().item():.2e}")
+            d = (exp.float() - got.float()).abs().max().item()
+            if d > _BF16_TOL:
+                problems.append(f"{name}: maxdiff={d:.2e} "
+                                f"(> {_BF16_TOL:.0e})")
     return problems
 
 
@@ -216,7 +224,8 @@ def main():
         for p in problems[:20]:
             print(f"    - {p}")
         return 1
-    print("  [OK] structure, config, dtype, échantillons bit-à-bit conformes")
+    print("  [OK] structure, config, dtype, échantillons conformes"
+          " (écarts ≤ 1-2 ulp bf16 tolérés)")
     return 0
 
 
