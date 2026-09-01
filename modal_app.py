@@ -1124,4 +1124,21 @@ def vma_product_full(
         (torch.stack(all_preds).mode(dim=0).values == test)
         .float().mean().item()), 4)
     print("RESULTAT_VMA_FULL " + json.dumps(result), flush=True)
+
+    # résumé lisible (le JSON ci-dessus reste la sortie machine ; ce bloc est
+    # destiné à l'œil humain — aucune valeur mesurée n'y est en dur)
+    g = result["vote_global"] * 100
+    interp = ("défense efficace : la permutation Π n'est PAS récupérée"
+              if g < 1.0 else "défense défaillante : Π récupérée")
+    print("=" * 62, flush=True)
+    print("RÉSUMÉ — VMA produit (Table 9)", flush=True)
+    print(f"  modèle   : {model_subdir}", flush=True)
+    print(f"  vues     : {', '.join(view_list)} ({len(view_list)})", flush=True)
+    print(f"  couches  : {n_layers} (vote complet)", flush=True)
+    print(f"  tokens   : {len(test)}", flush=True)
+    for view in view_list:
+        print(f"  vote {view:<12}: {result[f'vote_{view}'] * 100:.2f} %", flush=True)
+    print(f"  vote global     : {g:.2f} %", flush=True)
+    print(f"  ➜ {interp}", flush=True)
+    print("=" * 62, flush=True)
     return result
