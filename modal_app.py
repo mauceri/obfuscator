@@ -60,10 +60,12 @@ TRANSFORM_IMAGE = (
     .add_local_dir(_ALOEPRI_DIR, "/pkg/aloepri", copy=True)
     .add_local_file(
         "/home/mauceric/gen_corpus_gepa_codex/corpus_synth_clean_10000.jsonl",
-        "/corpus_gepa.jsonl")
+        "/corpus_gepa.jsonl", copy=True)
     # Échantillon frwiki (NDJSON, 10 fichiers wiki_XX) pour la précision 9.6 :
     # le corpus complet (~/corpus_fr/frwiki, 1,1 Go) n'est pas monté dans le
     # conteneur — on embarque un sous-ensemble déterministe (wiki_00..09).
+    # copy=True partout : tous les add_local_* copient dans l'image au build
+    # (un mount non-copied suivi d'un build step est refusé par Modal).
     .add_local_dir(
         "/home/mauceric/corpus_fr/frwiki_sample",
         "/frwiki_sample", copy=True)
