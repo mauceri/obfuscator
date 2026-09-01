@@ -61,6 +61,12 @@ TRANSFORM_IMAGE = (
     .add_local_file(
         "/home/mauceric/gen_corpus_gepa_codex/corpus_synth_clean_10000.jsonl",
         "/corpus_gepa.jsonl")
+    # Échantillon frwiki (NDJSON, 10 fichiers wiki_XX) pour la précision 9.6 :
+    # le corpus complet (~/corpus_fr/frwiki, 1,1 Go) n'est pas monté dans le
+    # conteneur — on embarque un sous-ensemble déterministe (wiki_00..09).
+    .add_local_dir(
+        "/home/mauceric/corpus_fr/frwiki_sample",
+        "/frwiki_sample", copy=True)
 )
 # Image du service : transformers + serveur web, sans le package aloepri
 # (inutile ici : le serveur ne permute/dépermute rien).
@@ -1141,4 +1147,90 @@ def vma_product_full(
     print(f"  vote global     : {g:.2f} %", flush=True)
     print(f"  ➜ {interp}", flush=True)
     print("=" * 62, flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def precision_frwiki(
+    seed: int = 0,
+    n_files: int = 4,
+    max_tokens: int = 4000,
+    base_ref: str = "Qwen/Qwen3-8B",
+    ft_ref: str = "qwen3-8b-ft-gepa",
+    obf_ref: str = "qwen3-8b-ft-h128",
+):
+    """Précision sur un échantillon frwiki : perplexité + top-1 next-token.
+
+    Comparaison base (HF) vs fine-tuné (9.1b) vs fine-tuné+obfusqué h>0
+    (9.2). L'échantillon frwiki est embarqué dans l'image
+    (`/frwiki_sample`, NDJSON wiki_XX). L'obfusqué reçoit les ids PERMUTÉS
+    (perm régénérée par seed, comme vma_product_full) et ses logits sont
+    dépermutés avant comparaison.
+    """
+    import json
+    import os
+    import random
+    import sys as _sys
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # --- échantillon frwiki : NDJSON (une ligne = {"id","title","text",...})
+    root = "/frwiki_sample"
+    files = sorted(os.listdir(root))[:n_files]
+    tok = AutoTokenizer.from_pretrained(base_ref)
+    ids = []
+    for n in files:
+        with open(os.path.join(root, n), encoding="utf-8",
+                  errors="ignore") as fh:
+            for line in fh:
+                try:
+                    text = json.loads(line).get("text", "")
+                except json.JSONDecodeError:
+                    continue
+                if text:
+                    ids += tok(text, add_special_tokens=False).input_ids
+                if len(ids) > max_tokens:
+                    break
+        if len(ids) > max_tokens:
+            break
+    ids = torch.tensor(ids[:max_tokens])
+    print(f"[frwiki] échantillon : {len(files)} fichiers → {ids.numel()} tokens",
+          flush=True)
+
+    # perm régénérée par seed (même convention que transform_chained /
+    # vma_product_full : random.Random(seed).shuffle(range(V)))
+    V = 151936  # vocabulaire Qwen3-8B (config vocabsize)
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))   # {clair: obfusqué}
+
+    def _metrics(model_ref, perm=None):
+        m = AutoModelForCausalLM.from_pretrained(
+            model_ref, dtype=torch.bfloat16).cuda().eval()
+        if perm:
+            ids_in = torch.tensor([perm[int(t)] for t in ids.tolist()])
+        else:
+            ids_in = ids.clone()
+        with torch.no_grad():
+            logits = m(ids_in[None, :-1].cuda()).logits[0]   # (L-1, V)
+        if perm:
+            cols = torch.tensor([perm[t] for t in range(logits.shape[1])]).cuda()
+            logits = logits[:, cols]
+        loss = torch.nn.functional.cross_entropy(
+            logits.float(), ids[1:].cuda()).item()
+        top1 = float((logits.argmax(-1) == ids[1:].cuda()).float().mean().item())
+        return {"perplexite": round(2 ** loss, 2), "top1_next_token": round(top1, 4)}
+
+    # la base est chargée depuis HF (réf. publique) ; ft et obf depuis le volume
+    result = {
+        "base": _metrics(base_ref),
+        "ft": _metrics(os.path.join(MODELS_DIR, ft_ref)),
+        "ft_obf_h128": _metrics(os.path.join(MODELS_DIR, obf_ref), perm=perm),
+    }
+    print("RESULTAT_PRECISION_FRWIKI " + json.dumps(result), flush=True)
     return result
