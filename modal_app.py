@@ -902,7 +902,7 @@ def vma_product_attack(
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
-              gpu="A100-40GB", timeout=7200, scaledown_window=300)
+              gpu="A100-80GB", timeout=7200, scaledown_window=300)
 def finetune_corpus(
     model_name: str = "Qwen/Qwen3-0.6B",
     epochs: int = 5,
@@ -913,7 +913,13 @@ def finetune_corpus(
     seed: int = 0,
 ):
     """Entraînement COMPLET (fine-tuning de tous les paramètres) sur le corpus
-    GEPA (français synthétique hors distribution), GPU A100.
+    GEPA (français synthétique hors distribution), GPU A100-80GB.
+
+    Mémoire (Qwen3-8B, 8,07 Md params, bf16 complet) : poids 16,1 Go +
+    gradients 16,1 Go + états AdamW (m/v) 32,3 Go = 64,5 Go, + activations
+    avec gradient checkpointing (~2-4 Go) → tient sur 80 Go. AdamW fp32
+    classique (m/v = 64,6 Go) porterait le total à 96,8 Go — infaisable,
+    même sur A100-80GB.
 
     Objectif (spike VMA) : un vrai entraînement doit décaler les poids assez
     pour casser la VMA produit contre la référence publique. Sortie : modèle
@@ -950,8 +956,12 @@ def finetune_corpus(
           flush=True)
 
     torch.manual_seed(seed)
+    # bf16 COMPLET (poids + grads + états AdamW) : avec des params bf16,
+    # torch.optim.AdamW crée des états m/v bf16 automatiquement (zeros_like).
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.float32).to("cuda").train()
+        model_name, dtype=torch.bfloat16).to("cuda").train()
+    model.config.use_cache = False  # requis avec gradient checkpointing
+    model.gradient_checkpointing_enable()  # activations re-calculées au backward
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
 
     steps_per_epoch = max(1, n_seq // batch_size)
