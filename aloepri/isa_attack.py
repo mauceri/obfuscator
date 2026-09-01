@@ -187,3 +187,109 @@ if __name__ == "__main__":
     print(f"ids réels   : {ids}")
     print(f"ids attaqués: {pred.tolist()}")
     print(f"taux de correspondance : {rate:.1%}")
+
+
+# ---------------------------------------------------------------------------
+# Vocab-matching DISCRET (point 4 de la revue) — sans relaxation continue.
+#
+# La descente de gradient (attack_model) trouve des soft tokens dans
+# l'enveloppe convexe du simplexe qui reproduisent l'état caché sans être le
+# prompt — la loss converge (0,007) mais les ids ne matchent pas (0 %), ce
+# qui ne permet PAS de conclure « canal hidden non informatif » (Thomas et
+# al. : recherche discrète et autorégressive).
+#
+# Test discriminatif k-way : à chaque position, le vrai token est mélangé à
+# k−1 leurres (tirage uniforme dans le vocabulaire). Le canal est informatif
+# si le vrai token est identifié de façon fiable (taux → 100 %) ; s'il est
+# sous-déterminé, le taux tend vers 1/k. Deux variantes :
+#   - teacher_forcing=True : préfixe = VRAIS tokens (borne haute : isole la
+#     capacité du canal à la couche `layer`) ;
+#   - teacher_forcing=False : greedy autorégressif (préfixe = tokens prédits,
+#     mesure la récupération réelle, propagation d'erreur incluse).
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def _state_at_position(model, embeds, layer, channel="hidden"):
+    """État interne (T, *) du modèle pour `embeds` (B, T, d), dernière position
+    de chaque ligne du batch. `embeds` est upcasté vers le dtype du modèle
+    (le modèle est bf16, la table d'embedding d'attaque est float32)."""
+    embeds = embeds.to(model.dtype)
+    kw = {"output_hidden_states": True} if channel == "hidden" \
+        else {"output_attentions": True}
+    out = model(inputs_embeds=embeds, **kw)
+    if channel == "hidden":
+        return out.hidden_states[layer][:, -1]      # (B, hidden)
+    attn = out.attentions[layer][:, :, -1, :]        # (B, heads, T) — dernière
+    return attn.mean(dim=1)                          # position, moyenne têtes
+
+
+def _state_distance(state, target_pos, target_var, metric="mse"):
+    """Distance entre l'état d'un candidat (B, hidden) et la cible (hidden,)."""
+    if metric == "mse":
+        return (state.float() - target_pos.float()).pow(2).mean(dim=1) / target_var
+    # cosinus (1 - cos) : insensible à l'échelle
+    q = torch.nn.functional.normalize(state.float(), dim=1)
+    t = torch.nn.functional.normalize(target_pos.float(), dim=0)
+    return 1.0 - (q @ t)
+
+
+def vocab_match_attack(model, embed_table, target_state, true_ids, layer,
+                       k=64, channel="hidden", teacher_forcing=True,
+                       metric="mse", batch=128, seed=0, device="cuda"):
+    """Vocab-matching discret k-way (greedy autorégressif ou teacher-forced).
+
+    `target_state` : (T, hidden) — état caché de la couche `layer` capturé
+    sur l'entrée réelle (déjà dans l'espace du modèle, ids permutés).
+    `true_ids` : (T,) — les ids réels (vérité terrain, pour l'évaluation ;
+    l'attaquant ne les utilise PAS pour choisir, seulement pour mesurer).
+
+    Retourne (ids_récupérés (T,), taux, taux_couche (T,)).
+    """
+    torch.manual_seed(seed)
+    vocab = embed_table.shape[0]
+    seq_len = len(true_ids)
+    target_var = target_state.float().pow(2).mean().item()
+    pred = torch.zeros(seq_len, dtype=torch.long, device=device)
+    hit = torch.zeros(seq_len, dtype=torch.bool, device=device)
+
+    for t in range(seq_len):
+        # candidats : le vrai token + k−1 leurres, mélangés (ordre inconnu)
+        prefix_ids = (true_ids[:t] if teacher_forcing else pred[:t])
+        cand = torch.randint(0, vocab, (k - 1,), device=device)
+        cand = torch.cat([true_ids[t:t + 1], cand])
+        cand = cand[torch.randperm(k, device=device)]
+
+        inp = torch.cat([
+            prefix_ids.unsqueeze(0).expand(k, -1),
+            cand.unsqueeze(1),
+        ], dim=1)                                        # (k, t+1)
+        embeds = embed_table[inp]
+        dists = torch.empty(k, dtype=torch.float32, device=device)
+        for c0 in range(0, k, batch):
+            c1 = min(c0 + batch, k)
+            st = _state_at_position(model, embeds[c0:c1], layer, channel)
+            dists[c0:c1] = _state_distance(st, target_state[t],
+                                           target_var, metric)
+        chosen = int(dists.argmin().item())
+        pred[t] = cand[chosen]
+        hit[t] = (pred[t] == true_ids[t])
+        print(f"  [vma] pos {t}: prédit {pred[t].item()} "
+              f"({'✓' if hit[t] else '✗'}) — vrai {true_ids[t].item()}", flush=True)
+
+    return pred, float(hit.float().mean().item()), hit
+
+
+def run_vocab_match(model, token_ids, layer, k=64, channel="hidden",
+                    teacher_forcing=True, metric="mse", seed=0, device="cuda"):
+    """Attaque vocab-matching complète : capture de l'état puis discrimination
+    k-way. `token_ids` : IDs déjà dans l'espace du modèle (permutés)."""
+    embed_table = model.get_input_embeddings().weight.detach().float()
+    true_ids = torch.tensor(token_ids, device=device)
+    with torch.no_grad():
+        true_embeds = embed_table[true_ids]
+    target = capture_state(model, true_embeds, layer, channel)
+    pred, rate, hit = vocab_match_attack(
+        model, embed_table, target, true_ids, layer, k=k, channel=channel,
+        teacher_forcing=teacher_forcing, metric=metric, seed=seed, device=device,
+    )
+    return pred, rate, hit
