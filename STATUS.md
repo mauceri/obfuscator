@@ -1,6 +1,6 @@
 # État du projet — obfuscator (AloePri pour Qwen3-8B)
 
-*Synthèse durable — mise à jour 2026-08-27. Les détails sont dans les rapports `artifacts/*.md` et le notebook (marqueurs `cellule N`).*
+*Synthèse durable — mise à jour 2026-09-01. Les détails sont dans les rapports `artifacts/*.md` et le notebook (marqueurs `cellule N`, journal daté cellule 34).*
 
 ## Ce que c'est
 Implémentation d'**AloePri** (arXiv 2603.01499) : inférence LLM confidentielle par
@@ -20,9 +20,12 @@ CLI Modal : `~/modal-venv/bin/modal`.
    `attention_inversion.py` ; **VMA directe** `vma_attack.py` ; **VMA produit
    (Table 9)** `vma_product.py` + `vma_product_full` (toutes couches).
 4. **Fine-tuning** : `modal_app.py::finetune_corpus` (corpus GEPA synthétique,
-   embarqué dans l'image Modal).
-5. **Notebook** pédagogique (50 cellules, marqueurs `cellule N`) — mi-papier,
-   mi-cellules, structuré sur la Figure 2.
+   embarqué dans l'image Modal) — 8B en bf16 complet + gradient checkpointing,
+   A100-80GB.
+5. **Notebook** pédagogique (36 cellules, marqueurs `cellule N`) — mi-papier,
+   mi-cellules, structuré sur la Figure 2 ; section 9 = sécurité (9.1-9.6),
+   cellule 34 = journal des résultats datés, cellule 35 = annexe des méthodes
+   `modal_app.py`. Bloc POC h=0 retiré (2026-09-01).
 6. **Tests** : 58 (14 fichiers) — `pytest aloepri/tests/` (venv Wiki_LM).
 
 ## Résultats clés (mesures, avec références)
@@ -35,11 +38,17 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | ISA hidden couche 18 (8B h>0) | **0 %** | `chained_8b_report.md` |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
 | Qualité 8B h>0 (α=0.3) | capitale→Paris ; corr logits 0.94-0.975 ; top1 0.625 | `chained_8b_report.md` |
+| **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
+| **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 34 |
+| **VMA produit 8B FT+h>0 (01/09)** | vote_gate 0,05 %, vote_up 0 %, **vote_global 0 %** | notebook cellule 34 |
+| **ISA hidden 8B FT+h>0 (01/09)** | loss 0,93 → 0,007 (converge), **récupération 0 %** | notebook cellule 34 |
+| **Précision frwiki (01/09)** | perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; top-1 0,809 / 0,789 / 0,774 | notebook cellule 34 |
 | Table 3 du papier (Qwen3-14B : VMA 25 % à α_e=1.0) | **non reproductible** avec notre procédure (réserve : leur métrique/vue inconnue) | `vma_produit_8b_complet.md` |
 
 **Lecture sécurité (8B h>0, α_e=0.3)** : VMA directe impossible (d+2h ≠ d) ;
-VMA produit 0 % ; ISA hidden 0 %. Résidu : vues V×V non testées + écart de
-procédure avec le papier.
+VMA produit 0 % ; ISA hidden 0 % ; coût qualité mesuré (frwiki : +14 % de
+perplexité base vs FT+h>0, top-1 −3,5 pts). Résidu : vues V×V non testées +
+écart de procédure avec le papier.
 
 ## Déploiement
 - Service : `https://mauceri--obfuscator-aloepri-serve.modal.run` — health 200
@@ -64,9 +73,12 @@ procédure avec le papier.
   dur dans les cellules (commit `495bf8b`).
 
 ## Ouvert / à faire
+- **Revue de code complète** (demandée par l'utilisateur — modal_app.py en
+  priorité, par un agent externe) : à faire après la précision frwiki.
 - Vues **V×V** de la Table 9 (gram q·k, W_e·W_h — 46 Go) : non testées
   (nécessite A100-80GB/H100 ou streaming disque).
-- Benchmark de précision sur corpus (MMLU-like) du modèle 8B h>0.
+- Benchmark de précision plus large (frwiki complet sur volume Modal, plus de
+  tokens) — l'échantillon embarqué fait 4000 tokens.
 - Canal **attention** ISA sur le modèle h>0 (seul le canal hidden a été
   re-mesuré).
 - **IMA** (attaque par entraînement) : non implémentée (évidence papier 0 %).
