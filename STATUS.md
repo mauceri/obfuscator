@@ -33,22 +33,23 @@ CLI Modal : `~/modal-venv/bin/modal`.
 |---|---|---|
 | VMA directe (h=0) | Π récupérée ~99-100 % (même à α_e=1.0) → nécessite h>0 | `vma_report.md` |
 | VMA produit 0.6B chaîné (8 couches, α=0.3) | 18,4 % ; à α=0 : 99,6 % | `vma_produit_8b_complet.md` |
-| **VMA produit 8B h>0 (36 couches, 2 vues, vote)** | **0,0 %** | idem |
-| Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | idem |
-| ISA hidden couche 18 (8B h>0) | **0 %** | `chained_8b_report.md` |
+| **VMA produit 8B h>0 — contrôle positif (base α_e=0, attaque corrigée)** | **99,95 %** (chemin de code validé) | notebook cellule 34 |
+| **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 34 |
+| Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | `vma_produit_8b_complet.md` |
+| ISA hidden couche 18 (8B h>0) | 0 % (gradient) — **non concluant** (relaxation continue ; test discret en attente) | `chained_8b_report.md` |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
 | Qualité 8B h>0 (α=0.3) | capitale→Paris ; corr logits 0.94-0.975 ; top1 0.625 | `chained_8b_report.md` |
 | **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
 | **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 34 |
-| **VMA produit 8B FT+h>0 (01/09)** | vote_gate 0,05 %, vote_up 0 %, **vote_global 0 %** | notebook cellule 34 |
-| **ISA hidden 8B FT+h>0 (01/09)** | loss 0,93 → 0,007 (converge), **récupération 0 %** | notebook cellule 34 |
-| **Précision frwiki (01/09)** | perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; top-1 0,809 / 0,789 / 0,774 | notebook cellule 34 |
-| Table 3 du papier (Qwen3-14B : VMA 25 % à α_e=1.0) | **non reproductible** avec notre procédure (réserve : leur métrique/vue inconnue) | `vma_produit_8b_complet.md` |
+| **Précision frwiki (01/09, α_e=0,3)** | perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; top-1 0,809 / 0,789 / 0,774 (échantillon 4000 tokens — à élargir) | notebook cellule 34 |
+| Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 34 |
 
-**Lecture sécurité (8B h>0, α_e=0.3)** : VMA directe impossible (d+2h ≠ d) ;
-VMA produit 0 % ; ISA hidden 0 % ; coût qualité mesuré (frwiki : +14 % de
-perplexité base vs FT+h>0, top-1 −3,5 pts). Résidu : vues V×V non testées +
-écart de procédure avec le papier.
+**Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
+produit est neutralisée par le **bruit α_e=1,0** (8,35 %, conforme au papier
+13-25 %) — **α_e=0,3 est insuffisant (90,8 %)** ; le « 0,0 % » initial était
+un artefact de l'attaque bf16 cassée. ISA : 0 % par gradient mais non
+concluant (relaxation continue) — test discret à lancer. Résidu : vues V×V
+non testées + coût qualité α_e=1,0 à mesurer.
 
 ## Déploiement
 - Service : `https://mauceri--obfuscator-aloepri-serve.modal.run` — health 200
