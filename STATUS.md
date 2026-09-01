@@ -41,7 +41,7 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | Qualité 8B h>0 (α=0.3) | capitale→Paris ; corr logits 0.94-0.975 ; top1 0.625 | `chained_8b_report.md` |
 | **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
 | **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 34 |
-| **Précision frwiki (01/09, α_e=0,3)** | perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; top-1 0,809 / 0,789 / 0,774 (échantillon 4000 tokens — à élargir) | notebook cellule 34 |
+| **Précision frwiki (01/09)** | α_e=0,3 : perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; **α_e=1,0 : 2,28** (top-1 0,7527) — coût du réglage défensif mesuré (échantillon 4000 tokens, à élargir) | notebook cellule 34 |
 | Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 34 |
 
 **Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
