@@ -1013,17 +1013,27 @@ def vma_product_full(
     model_subdir: str = "qwen3-8b-obf-h128",
     seed: int = 0,
     subset_size: int = 2000,
-    views: str = "gate,up",
+    views: str = "gate",
 ):
-    """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + vote.
+    """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + agrégation.
 
-    Le maximum réalisable à V=151 936 sur A100-40GB : les vues V×inter
-    (gate, up). Les vues V×V (gram q·k, W_e·W_h) font 46 Go — infaisables ;
-    W_down·W_h porte Π sur les colonnes (RowSort détruirait l'info).
+    Le maximum réalisable à V=151 936 sur A100-40GB : la vue V×inter gate.
+    La vue up est INUTILISABLE par construction : le scaling Ŝ_ffn vit sur
+    `up_proj` (ffn_obfuscation.py) et RowSort élimine Ẑ (permutation) mais
+    PAS Ŝ (scaling diagonal, modifie le multiset de chaque ligne) → TTRSR
+    ≈ 0 % acquis, sans rapport avec la défense. Les vues V×V (gram q·k,
+    W_e·W_h) font 46 Go — infaisables.
+
+    Précision : les poids du volume sont en bf16, mais les produits
+    W̃_e·W̃_gateᵀ sont calculés en FP32 — le chaînage P̂Q̂≈I en bf16 accumule
+    une erreur (max|Y−X| ≈ 0,33) qui détruit l'appariement même à α_e=0
+    (mesuré : 16 % au lieu de 100 % sur clés aléatoires).
 
     Pour chaque vue × chaque couche : produit W̃_e·W̃_gateᵀ (ou up), RowSort
-    chunké, appariement NN sur `subset_size` tokens → prédiction Π par couche.
-    Vote par vue (toutes les couches) puis vote global entre vues.
+    chunké, appariement cosinus sur `subset_size` tokens → similarités (N,V).
+    Agrégation : somme des similarités (z-score par ligne) sur les couches,
+    puis argmax global — le vote par mode (mode sur 36 quasi-aléatoires ≈ 0 %)
+    détruisait le signal faible au lieu de l'agréger.
     """
     import json
     import random
@@ -1083,7 +1093,10 @@ def vma_product_full(
     clear_embed = clear_embed.to(dev)
 
     # poids par couche (chargés à la volée, libérés après)
-    per_view = {v: [] for v in view_list}
+    # agrégation : similarités (N, V) cumulées par vue (z-score par ligne
+    # pour donner le même poids à chaque couche) puis argmax global
+    per_view = {v: torch.zeros(len(test), V, dtype=torch.float32,
+                               device=dev) for v in view_list}
     for i in range(n_layers):
         obf_names = [f"model.layers.{i}.mlp.gate_proj.weight",
                      f"model.layers.{i}.mlp.up_proj.weight"]
@@ -1099,37 +1112,47 @@ def vma_product_full(
 
         for view in view_list:
             key = f"model.layers.{i}.mlp.{view}_proj.weight"
-            g_obf = obf_w[key].to(dev)          # (inter, d2) obfusqué
-            g_clair = clr[key] * wn[None, :]    # (inter, d) + fold Wnorm
-            Y = obf_embed[obf_rows_idx] @ g_obf.t()          # (N, inter)
+            g_obf = obf_w[key].to(dev).float()  # (inter, d2) obfusqué
+            g_clair = (clr[key] * wn[None, :]).float()  # (inter, d) fold Wnorm
+            # PRODUITS EN FP32 : le chaînage P̂Q̂≈I en bf16 accumule une erreur
+            # (max|Y−X| ≈ 0,33) qui détruit l'appariement même à α_e=0.
+            Y = (obf_embed[obf_rows_idx].float() @ g_obf.t())  # (N, inter)
             Y = _row_sort_chunked(Y)
             X = torch.empty(V, g_clair.shape[0],
-                            dtype=torch.bfloat16, device=dev)
+                            dtype=torch.float32, device=dev)
             for c0 in range(0, V, 8192):
                 c1 = min(c0 + 8192, V)
-                X[c0:c1] = clear_embed[c0:c1] @ g_clair.t().to(torch.bfloat16)
+                X[c0:c1] = clear_embed[c0:c1].float() @ g_clair.t()
             X = _row_sort_chunked(X)
-            pred = nearest_neighbor_rows(Y, X, chunk=2048)
-            rate = float((pred == test).float().mean().item())
-            per_view[view].append(pred)
+            # cosinus par blocs → similarités (N, V) ajoutées au cumul
+            q = torch.nn.functional.normalize(Y, dim=1)
+            t = torch.nn.functional.normalize(X, dim=1)
+            for c0 in range(0, V, 8192):
+                c1 = min(c0 + 8192, V)
+                sim = q @ t[c0:c1].t()               # (N, 8192)
+                sim = (sim - sim.mean(dim=1, keepdim=True)) \
+                    / (sim.std(dim=1, keepdim=True) + 1e-6)   # z-score
+                per_view[view][:, c0:c1] += sim
+            rate = float((per_view[view].argmax(dim=1) == test)
+                         .float().mean().item())
             print(f"[vma_full] vue={view} couche {i}/{n_layers}: "
-                  f"TTRSR={rate:.1%}", flush=True)
-            del X, Y, pred
+                  f"TTRSR(cumul)={rate:.1%}", flush=True)
+            del X, Y, q, t, sim
             if dev == "cuda":
                 torch.cuda.empty_cache()
         del obf_w, clr
 
-    # votes
+    # agrégation finale : argmax global sur le cumul de similarités
     result = {"modele": model_subdir, "vues": view_list,
               "n_couches": n_layers, "n_tokens": len(test)}
     all_preds = []
-    for view, preds in per_view.items():
-        vote = torch.stack(preds).mode(dim=0).values
-        rate = float((vote == test).float().mean().item())
+    for view, sims in per_view.items():
+        pred = sims.argmax(dim=1)
+        rate = float((pred == test).float().mean().item())
         result[f"vote_{view}"] = round(rate, 4)
-        all_preds.append(vote)
+        all_preds.append(sims)
     result["vote_global"] = round(float(
-        (torch.stack(all_preds).mode(dim=0).values == test)
+        (torch.stack(all_preds).sum(0).argmax(dim=1) == test)
         .float().mean().item()), 4)
     print("RESULTAT_VMA_FULL " + json.dumps(result), flush=True)
 
@@ -1142,11 +1165,11 @@ def vma_product_full(
     print("RÉSUMÉ — VMA produit (Table 9)", flush=True)
     print(f"  modèle   : {model_subdir}", flush=True)
     print(f"  vues     : {', '.join(view_list)} ({len(view_list)})", flush=True)
-    print(f"  couches  : {n_layers} (vote complet)", flush=True)
+    print(f"  couches  : {n_layers} (agrégation : somme des similarités)", flush=True)
     print(f"  tokens   : {len(test)}", flush=True)
     for view in view_list:
-        print(f"  vote {view:<12}: {result[f'vote_{view}'] * 100:.2f} %", flush=True)
-    print(f"  vote global     : {g:.2f} %", flush=True)
+        print(f"  taux {view:<12}: {result[f'vote_{view}'] * 100:.2f} %", flush=True)
+    print(f"  taux global     : {g:.2f} %", flush=True)
     print(f"  ➜ {interp}", flush=True)
     print("=" * 62, flush=True)
     return result
