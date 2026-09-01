@@ -36,7 +36,7 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | **VMA produit 8B h>0 — contrôle positif (base α_e=0, attaque corrigée)** | **99,95 %** (chemin de code validé) | notebook cellule 34 |
 | **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 34 |
 | Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | `vma_produit_8b_complet.md` |
-| ISA hidden couche 18 (8B h>0) | 0 % (gradient) — **non concluant** (relaxation continue ; test discret en attente) | `chained_8b_report.md` |
+| ISA hidden couche 18 (8B h>0) | **0 % par gradient (artefact) ; 100 % en recherche discrète (k-way)** → canal hidden INFORMATIF | notebook cellule 34 |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
 | Qualité 8B h>0 (α=0.3) | capitale→Paris ; corr logits 0.94-0.975 ; top1 0.625 | `chained_8b_report.md` |
 | **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
@@ -47,9 +47,9 @@ CLI Modal : `~/modal-venv/bin/modal`.
 **Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
 produit est neutralisée par le **bruit α_e=1,0** (8,35 %, conforme au papier
 13-25 %) — **α_e=0,3 est insuffisant (90,8 %)** ; le « 0,0 % » initial était
-un artefact de l'attaque bf16 cassée. ISA : 0 % par gradient mais non
-concluant (relaxation continue) — test discret à lancer. Résidu : vues V×V
-non testées + coût qualité α_e=1,0 à mesurer.
+un artefact de l'attaque bf16 cassée. ISA : canal hidden INFORMATIF
+(100 % en recherche discrète k-way) — la protection du texte repose
+uniquement sur la clé Π côté client. Résidu : vues V×V non testées.
 
 ## Déploiement
 - Service : `https://mauceri--obfuscator-aloepri-serve.modal.run` — health 200
