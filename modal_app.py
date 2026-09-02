@@ -69,6 +69,11 @@ TRANSFORM_IMAGE = (
     .add_local_dir(
         "/home/mauceric/corpus_fr/frwiki_sample",
         "/frwiki_sample", copy=True)
+    # Vocabulaire effectif du corpus GEPA (ids triés par fréquence décroissante,
+    # un par ligne) — pour l'analyse « où tombent les tokens récupérés » (Zipf).
+    .add_local_file(
+        "/home/mauceric/obfuscator/data/gepa_vocab_ids.txt",
+        "/gepa_vocab_ids.txt", copy=True)
 )
 # Image du service : transformers + serveur web, sans le package aloepri
 # (inutile ici : le serveur ne permute/dépermute rien).
@@ -1146,6 +1151,7 @@ def vma_product_full(
     seed: int = 0,
     subset_size: int = 2000,
     views: str = "gate",
+    sample: str = "uniform",
 ):
     """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + agrégation.
 
@@ -1219,7 +1225,31 @@ def vma_product_full(
     perm = dict(zip(range(V), permuted_ids))
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    test = torch.randperm(V)[:subset_size].to(dev)
+    # échantillonnage des tokens testés :
+    # - "uniform" : tirage uniforme sur le vocabulaire (défaut) ;
+    # - "gepa-tete" : les `subset_size` tokens les plus fréquents de GEPA
+    #   (fichier /gepa_vocab_ids.txt embarqué, ids triés par fréquence) —
+    #   pour l'analyse « où tombent les récupérés » dans les classes
+    #   fréquentes (1-10, 11-100, …) ;
+    # - "gepa-strat" : tête (10 + 90) + échantillon uniforme du reste de GEPA.
+    if sample == "uniform":
+        test = torch.randperm(V)[:subset_size].to(dev)
+    else:
+        with open("/gepa_vocab_ids.txt") as f:
+            gepa_ids = [int(l) for l in f if l.strip()]
+        if sample == "gepa-tete":
+            chosen = gepa_ids[:subset_size]
+        elif sample == "gepa-strat":
+            head = gepa_ids[:100]                       # classes 1-10 + 11-100
+            rest = gepa_ids[100:]
+            n_rest = subset_size - len(head)
+            idx_rest = torch.randperm(len(rest),
+                                      generator=torch.Generator()
+                                      .manual_seed(seed))[:max(0, n_rest)]
+            chosen = head + [rest[int(k)] for k in idx_rest.tolist()]
+        else:
+            raise ValueError(f"sample inconnu : {sample!r}")
+        test = torch.tensor(chosen[:subset_size], device=dev)
     obf_rows_idx = torch.tensor([perm[int(t)] for t in test.tolist()]).to(dev)
     obf_embed = obf_embed.to(dev)
     clear_embed = clear_embed.to(dev)
