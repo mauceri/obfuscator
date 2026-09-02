@@ -55,7 +55,7 @@ TRANSFORM_IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
         "torch", "transformers>=4.51", "numpy", "scipy",
-        "safetensors", "huggingface_hub",
+        "safetensors", "huggingface_hub", "datasets",
     )
     .add_local_dir(_ALOEPRI_DIR, "/pkg/aloepri", copy=True)
     .add_local_file(
@@ -1428,4 +1428,89 @@ def precision_frwiki(
         "ft_obf_h128": _metrics(os.path.join(MODELS_DIR, obf_ref), perm=perm),
     }
     print("RESULTAT_PRECISION_FRWIKI " + json.dumps(result), flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def precision_piaf(
+    seed: int = 0,
+    n_questions: int = 500,
+    max_tokens: int = 64,
+    base_ref: str = "Qwen/Qwen3-8B",
+    ft_ref: str = "qwen3-8b-ft-gepa",
+    obf_ref: str = "qwen3-8b-ft-h128-a1-h02",
+):
+    """Précision sur des QUESTIONS françaises (PiaF, Hub HF) : perplexité +
+    top-1 next-token.
+
+    Comparaison base (HF) vs fine-tuné (9.1b) vs fine-tuné+obfusqué h>0
+    (9.2, α_e réglable via `obf_ref` — défaut α_e=1,0, le réglage défensif).
+    Les questions PiaF (format SQuAD) sont téléchargées depuis le Hub HF
+    (dataset `AgentPublic/piaf`) — questions SEULES, pas les contextes ni
+    les réponses : c'est le texte « utilisateur » typique, court et
+    interrogatif (structure très différente du texte courant frwiki).
+    L'obfusqué reçoit les ids PERMUTÉS (perm régénérée par seed) et ses
+    logits sont dépermutés avant comparaison.
+
+    Les questions sont concaténées (séparées par eos) jusqu'à ~max_tokens ;
+    la perplexité/top-1 portent donc sur le texte des questions.
+    """
+    import json
+    import os
+    import random
+    import sys as _sys
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(base_ref)
+    ds = load_dataset("AgentPublic/piaf", split="train")
+    questions = [q for q in ds["question"] if q and isinstance(q, str)]
+    random.Random(seed).shuffle(questions)
+    questions = questions[:n_questions]
+
+    # concaténation des questions (eos comme séparateur)
+    ids = []
+    for q in questions:
+        ids += tok.encode(q, add_special_tokens=False)
+        ids.append(tok.eos_token_id)
+        if len(ids) > max_tokens:
+            break
+    ids = torch.tensor(ids[:max_tokens])
+    print(f"[piaf] {len(questions)} questions → {ids.numel()} tokens",
+          flush=True)
+
+    V = 151936  # vocabulaire Qwen3-8B
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))   # {clair: obfusqué}
+
+    def _metrics(model_ref, perm=None):
+        m = AutoModelForCausalLM.from_pretrained(
+            model_ref, dtype=torch.bfloat16).cuda().eval()
+        if perm:
+            ids_in = torch.tensor([perm[int(t)] for t in ids.tolist()])
+        else:
+            ids_in = ids.clone()
+        with torch.no_grad():
+            logits = m(ids_in[None, :-1].cuda()).logits[0]
+        if perm:
+            cols = torch.tensor([perm[t] for t in range(logits.shape[1])]).cuda()
+            logits = logits[:, cols]
+        loss = torch.nn.functional.cross_entropy(
+            logits.float(), ids[1:].cuda()).item()
+        top1 = float((logits.argmax(-1) == ids[1:].cuda()).float().mean().item())
+        return {"perplexite": round(2 ** loss, 2), "top1_next_token": round(top1, 4)}
+
+    result = {
+        "base": _metrics(base_ref),
+        "ft": _metrics(os.path.join(MODELS_DIR, ft_ref)),
+        "ft_obf_h128": _metrics(os.path.join(MODELS_DIR, obf_ref), perm=perm),
+    }
+    print("RESULTAT_PRECISION_PIAF " + json.dumps(result), flush=True)
     return result
