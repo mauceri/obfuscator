@@ -40,6 +40,9 @@ Les trois exigences cœur du papier :
 - Avant d'implémenter une brique d'AloePri, énoncer explicitement les hypothèses
   de lecture du papier et les confirmer.
 - Chaque étape se termine par une vérification reproductible (test ou script de mesure).
+- **Push systématique après chaque commit** (`git push origin main`) — sanroque
+  est sujette à des coupures de courant ; GitHub est la source de vérité
+  consultable depuis n'importe quelle machine.
 
 ## Références
 
