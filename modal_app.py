@@ -1514,3 +1514,162 @@ def precision_piaf(
     }
     print("RESULTAT_PRECISION_PIAF " + json.dumps(result), flush=True)
     return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300,
+              secrets=[modal.Secret.from_name("deepseek-api-key")])
+def piaf_eval(
+    seed: int = 0,
+    n_pairs: int = 150,
+    max_new_tokens: int = 80,
+    base_ref: str = "Qwen/Qwen3-8B",
+    obf_ref: str = "qwen3-8b-ft-h128-a1-h02",
+    judge_model: str = "deepseek-chat",
+):
+    """Évaluation Q&A : génération sur couples PiaF puis jugement DeepSeek (1-5).
+
+    Pipeline (votre demande) :
+      1. GÉNÉRATION : `n_pairs` couples (question, contexte) de PiaF sont
+         tokenisés ; le modèle OBFUSQUÉ (α_e=1,0) et la BASE (réf. publique)
+         génèrent chacun une réponse. Pour l'obfusqué : ids PERMUTÉS envoyés,
+         réponse dépermutée côté client (perm régénérée par seed, jamais sur
+         Modal) — on sauve (question, contexte, réponse_obf, réponse_base).
+      2. JUGEMENT : DeepSeek (API, secret `deepseek-api-key`) note chaque
+         réponse de 1 à 5 en la comparant à la réponse de RÉFÉRENCE PiaF
+         (critère objectif), avec le contexte.
+      3. NOTE GLOBALE : moyenne des notes par modèle (obfusqué vs base).
+
+    Sortie : JSON sauvegardé sur le volume `obfuscator-models/piaf_eval.json`
+    + résumé lisible.
+    """
+    import json
+    import os
+    import random
+    import sys as _sys
+    import time
+    import urllib.request
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(base_ref)
+    ds = load_dataset("AgentPublic/piaf", split="train")
+    pairs = []
+    for q, c, a in zip(ds["question"], ds["context"], ds["answers"]):
+        if q and c and a and isinstance(a, dict) and a.get("text"):
+            pairs.append((q, c, a["text"][0]))
+    rng = random.Random(seed)
+    rng.shuffle(pairs)
+    pairs = pairs[:n_pairs]
+    print(f"[piaf_eval] {len(pairs)} couples (question, contexte, réponse réf)",
+          flush=True)
+
+    # permutation (seed) — régénérée, jamais envoyée
+    V = 151936
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))
+
+    # modèles : base + obfusqué
+    models = {}
+    models["base"] = AutoModelForCausalLM.from_pretrained(
+        base_ref, dtype=torch.bfloat16).cuda().eval()
+    models["obf"] = AutoModelForCausalLM.from_pretrained(
+        os.path.join(MODELS_DIR, obf_ref), dtype=torch.bfloat16).cuda().eval()
+
+    def _gen(model, text, perm=None):
+        """Génère une réponse (greedy) ; perm → ids permutés puis dépermutation."""
+        ids = tok.encode(text, add_special_tokens=False)
+        if perm:
+            ids_in = [perm[i] for i in ids]
+        else:
+            ids_in = ids
+        input_ids = torch.tensor([ids_in]).cuda()
+        with torch.no_grad():
+            out = model.generate(
+                input_ids, max_new_tokens=max_new_tokens,
+                do_sample=False, pad_token_id=tok.eos_token_id)
+        gen = out[0][input_ids.shape[1]:].tolist()
+        if perm:
+            unperm = {v: k for k, v in perm.items()}
+            gen = [unperm.get(i, i) for i in gen]
+        return tok.decode(gen, skip_special_tokens=True).strip()
+
+    # --- 1. génération ---
+    records = []
+    for i, (q, c, ref) in enumerate(pairs):
+        prompt = f"Question : {q}\nContexte : {c}\nRéponse :"
+        r_base = _gen(models["base"], prompt)
+        r_obf = _gen(models["obf"], prompt, perm=perm)
+        records.append({"idx": i, "question": q, "contexte": c,
+                        "reference": ref, "base": r_base, "obf": r_obf})
+        if (i + 1) % 25 == 0:
+            print(f"[gen] {i+1}/{len(pairs)} couples", flush=True)
+
+    # --- 2. jugement DeepSeek (1-5) ---
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    assert api_key, "DEEPSEEK_API_KEY manquant (secret deepseek-api-key)"
+
+    def _judge(record, model_key):
+        sys_prompt = (
+            "Évaluateur strict. Compare la réponse à évaluer à la réponse de "
+            "référence. Note 1 à 5 : 5=identique/exacte, 4=légèrement "
+            "incomplète, 3=partiellement correcte, 2=vague ou très "
+            "incomplète, 1=hors sujet ou vide. Réponds uniquement par "
+            "l'entier.")
+        user = (f"Question: {record['question']}\n"
+                f"Contexte: {record['contexte'][:800]}\n"
+                f"RÉFÉRENCE: {record['reference']}\n"
+                f"À ÉVALUER ({model_key}): {record[model_key]}\n"
+                f"Note (1-5) :")
+        body = json.dumps({"model": judge_model,
+                           "messages": [{"role": "system", "content": sys_prompt},
+                                        {"role": "user", "content": user}],
+                           "max_tokens": 5, "temperature": 0}).encode()
+        req = urllib.request.Request(
+            "https://api.deepseek.com/chat/completions", data=body,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            content = json.loads(r.read())["choices"][0]["message"]["content"]
+        try:
+            return max(1, min(5, int(content.strip())))
+        except ValueError:
+            return None   # réponse non parseable → non noté
+
+    notes = {"base": [], "obf": []}
+    for i, rec in enumerate(records):
+        for mk in ("base", "obf"):
+            n = _judge(rec, mk)
+            if n is not None:
+                notes[mk].append(n)
+            rec[f"note_{mk}"] = n
+        if (i + 1) % 25 == 0:
+            print(f"[judge] {i+1}/{len(records)} couples notés "
+                  f"(base moy {sum(notes['base'])/max(1,len(notes['base'])):.2f}, "
+                  f"obf moy {sum(notes['obf'])/max(1,len(notes['obf'])):.2f})",
+                  flush=True)
+        time.sleep(0.3)   # respecter le rate-limit
+
+    # --- 3. note globale ---
+    result = {
+        "n_pairs": len(pairs),
+        "note_globale_base": round(sum(notes["base"]) / len(notes["base"]), 2),
+        "note_globale_obf": round(sum(notes["obf"]) / len(notes["obf"]), 2),
+        "n_notee_base": len(notes["base"]),
+        "n_notee_obf": len(notes["obf"]),
+        "detail": records,
+    }
+    out_path = os.path.join(MODELS_DIR, "piaf_eval.json")
+    with open(out_path, "w") as f:
+        json.dump(result, f, ensure_ascii=False)
+    models_vol.commit()
+    print("RESULTAT_PIAF_EVAL " + json.dumps(
+        {k: v for k, v in result.items() if k != "detail"}, ensure_ascii=False),
+        flush=True)
+    return result
