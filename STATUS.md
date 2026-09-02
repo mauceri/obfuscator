@@ -42,7 +42,8 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
 | **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 34 |
 | **Précision frwiki (01/09)** | α_e=0,3 : perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; **α_e=1,0 : 2,28** (top-1 0,7527) | notebook cellule 34 |
-| **Précision PiaF questions (02/09)** | perp. base 6,09 / FT 6,97 / FT+obf α_e=1,0 **7,78** ; top-1 0,515 / 0,503 / 0,487 — coût de la défense sur texte interrogatif | notebook cellule 34 |
+| **Précision PiaF questions (02/09)** | perp. base 6,09 / FT 6,97 / FT+obf α_e=1,0 **7,78** ; top-1 0,515 / 0,503 / 0,487 | notebook cellule 35 |
+| **Q&A jugé DeepSeek (02/09, PiaF 150 couples)** | note base **4,62/5** vs obfusqué α_e=1,0 **4,42/5** (−0,20, −4,3 %) — la défense reste fonctionnelle en Q&A | notebook cellule 35 |
 | Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 34 |
 
 **Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
