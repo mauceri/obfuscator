@@ -4,6 +4,10 @@ Notebook de procédure AloePri (arXiv 2603.01499) pour Qwen3-8B, orchestrant
 Modal pour les étapes lourdes. Dépôt autonome : zéro dépendance à Secretarius
 (POC utilisé uniquement comme référence).
 
+- [Installation / démo client](docs/installation-demo.md)
+- [Rotation des clés (2 niveaux)](docs/rotation-cles.md)
+- [Présentation client (Marp, public avocats)](presentations/demo-avocats.md)
+
 ## Prérequis
 
 - Python 3.12.
