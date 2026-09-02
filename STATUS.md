@@ -1,6 +1,6 @@
 # État du projet — obfuscator (AloePri pour Qwen3-8B)
 
-*Synthèse durable — mise à jour 2026-09-01. Les détails sont dans les rapports `artifacts/*.md` et le notebook (marqueurs `cellule N`, journal daté cellule 34).*
+*Synthèse durable — mise à jour 2026-09-02. Les détails sont dans les rapports `artifacts/*.md` et le notebook (marqueurs `cellule N`, journal daté cellule 35).*
 
 ## Ce que c'est
 Implémentation d'**AloePri** (arXiv 2603.01499) : inférence LLM confidentielle par
@@ -22,29 +22,31 @@ CLI Modal : `~/modal-venv/bin/modal`.
 4. **Fine-tuning** : `modal_app.py::finetune_corpus` (corpus GEPA synthétique,
    embarqué dans l'image Modal) — 8B en bf16 complet + gradient checkpointing,
    A100-80GB.
-5. **Notebook** pédagogique (36 cellules, marqueurs `cellule N`) — mi-papier,
-   mi-cellules, structuré sur la Figure 2 ; section 9 = sécurité (9.1-9.6),
-   cellule 34 = journal des résultats datés, cellule 35 = annexe des méthodes
-   `modal_app.py`. Bloc POC h=0 retiré (2026-09-01).
-6. **Tests** : 58 (14 fichiers) — `pytest aloepri/tests/` (venv Wiki_LM).
+5. **Notebook** pédagogique (44 cellules, marqueurs `cellule N`) — mi-papier,
+   mi-cellules, structuré sur la Figure 2 ; section 9 = sécurité (9.1-9.6b,
+   cellules 22-34), journal des résultats datés = cellule 35 (§10), annexe
+   des méthodes `modal_app.py` = cellule 36 (§11), évaluation Q&A DeepSeek
+   (9.6c/9.6d) en cellules 42-43 (fin du notebook). Bloc POC h=0 retiré
+   (2026-09-01).
+6. **Tests** : 64 (14 fichiers) — `pytest aloepri/tests/` (venv Wiki_LM).
 
 ## Résultats clés (mesures, avec références)
 | Sujet | Résultat | Réf. |
 |---|---|---|
 | VMA directe (h=0) | Π récupérée ~99-100 % (même à α_e=1.0) → nécessite h>0 | `vma_report.md` |
 | VMA produit 0.6B chaîné (8 couches, α=0.3) | 18,4 % ; à α=0 : 99,6 % | `vma_produit_8b_complet.md` |
-| **VMA produit 8B h>0 — contrôle positif (base α_e=0, attaque corrigée)** | **99,95 %** (chemin de code validé) | notebook cellule 34 |
-| **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 34 |
+| **VMA produit 8B h>0 — contrôle positif (base α_e=0, attaque corrigée)** | **99,95 %** (chemin de code validé) | notebook cellule 35 |
+| **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 35 |
 | Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | `vma_produit_8b_complet.md` |
-| ISA hidden couche 18 (8B h>0) | **0 % par gradient (artefact) ; 100 % en recherche discrète (k-way)** → canal hidden INFORMATIF | notebook cellule 34 |
+| ISA hidden couche 18 (8B h>0) | **0 % par gradient (artefact) ; 100 % en recherche discrète (k-way)** → canal hidden INFORMATIF | notebook cellule 35 |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
 | Qualité 8B h>0 (α=0.3) | capitale→Paris ; corr logits 0.94-0.975 ; top1 0.625 | `chained_8b_report.md` |
-| **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 34 |
-| **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 34 |
-| **Précision frwiki (01/09)** | α_e=0,3 : perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; **α_e=1,0 : 2,28** (top-1 0,7527) | notebook cellule 34 |
+| **FT 8B complet (01/09)** | loss 1,76 → 0,27 (8475 pas, 83 min) → `qwen3-8b-ft-gepa` | notebook cellule 35 |
+| **AloePri h>0 8B (01/09)** | hidden 4352 (h=128), transform_chained sur le FT → `qwen3-8b-ft-h128` | notebook cellule 35 |
+| **Précision frwiki (01/09)** | α_e=0,3 : perp. base 1,88 / FT 2,01 / FT+h>0 2,14 ; **α_e=1,0 : 2,28** (top-1 0,7527) | notebook cellule 35 |
 | **Précision PiaF questions (02/09)** | perp. base 6,09 / FT 6,97 / FT+obf α_e=1,0 **7,78** ; top-1 0,515 / 0,503 / 0,487 | notebook cellule 35 |
 | **Q&A jugé DeepSeek (02/09, PiaF 150 couples)** | note base **4,62/5** vs obfusqué α_e=1,0 **4,42/5** (−0,20, −4,3 %) — la défense reste fonctionnelle en Q&A | notebook cellule 35 |
-| Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 34 |
+| Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 35 |
 
 **Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
 produit est neutralisée par le **bruit α_e=1,0** (8,35 %, conforme au papier
@@ -70,8 +72,8 @@ uniquement sur la clé Π côté client. Résidu : vues V×V non testées.
   (fine-tuning, runs Modal, calculs de plusieurs minutes) sans accord
   préalable avec budget.
 - `verify()` : tolérance bf16 `_BF16_TOL=2e-3` (le strict bit-à-bit échouait
-  sur 1-2 ulp bf16) ; les clés ne se re-téléchargent pas (cellule 2.3
-  idempotente).
+  sur 1-2 ulp bf16) ; les clés ne se re-téléchargent pas (chargement
+  idempotent).
 - Le notebook doit **calculer** ses chiffres — plus aucune valeur mesurée en
   dur dans les cellules (commit `495bf8b`).
 
