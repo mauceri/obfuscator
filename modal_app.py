@@ -1286,6 +1286,14 @@ def vma_product_full(
     result["vote_global"] = round(float(
         (torch.stack(all_preds).sum(0).argmax(dim=1) == test)
         .float().mean().item()), 4)
+
+    # tokens récupérés : les ids CLAIRS testés dont Π a été correctement
+    # retrouvée (pred == test) — pour l'analyse de fréquence (Zipf) côté
+    # client : où tombent-ils dans la distribution du corpus ?
+    pred_global = torch.stack(all_preds).sum(0).argmax(dim=1)
+    recup = test[pred_global == test].tolist()
+    result["tokens_recuperes"] = recup
+    result["n_tokens_recuperes"] = len(recup)
     print("RESULTAT_VMA_FULL " + json.dumps(result), flush=True)
 
     # résumé lisible (le JSON ci-dessus reste la sortie machine ; ce bloc est
