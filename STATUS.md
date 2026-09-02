@@ -37,6 +37,7 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | VMA produit 0.6B chaîné (8 couches, α=0.3) | 18,4 % ; à α=0 : 99,6 % | `vma_produit_8b_complet.md` |
 | **VMA produit 8B h>0 — contrôle positif (base α_e=0, attaque corrigée)** | **99,95 %** (chemin de code validé) | notebook cellule 35 |
 | **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 35 |
+| **VMA vue W_e·W_h 8B (02/09, dernière vue V×V de la Table 9)** | contrôle α=0 → **100 %** (chemin validé) ; défensif α_e=1,0/α_h=0,2 → **0 %** (0/2000) — bruit des deux côtés du produit | notebook cellule 35 (10.3b) |
 | Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | `vma_produit_8b_complet.md` |
 | ISA hidden couche 18 (8B h>0) | **0 % par gradient (artefact) ; 100 % en recherche discrète (k-way)** → canal hidden INFORMATIF | notebook cellule 35 |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
@@ -49,11 +50,12 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | Table 3 du papier (VMA 13-25 % à α_e=1.0) | **reproduit** (notre mesure : 8,35 % à α_e=1,0 — conforme) | notebook cellule 35 |
 
 **Lecture sécurité (8B h>0)** : VMA directe impossible (d+2h ≠ d) ; la VMA
-produit est neutralisée par le **bruit α_e=1,0** (8,35 %, conforme au papier
-13-25 %) — **α_e=0,3 est insuffisant (90,8 %)** ; le « 0,0 % » initial était
-un artefact de l'attaque bf16 cassée. ISA : canal hidden INFORMATIF
-(100 % en recherche discrète k-way) — la protection du texte repose
-uniquement sur la clé Π côté client. Résidu : vues V×V non testées.
+produit est neutralisée par le **bruit α_e=1,0** (vue gate : 8,35 %,
+conforme au papier 13-25 % ; vue W_e·W_h : **0 %**) — **α_e=0,3 est
+insuffisant (90,8 %)** ; le « 0,0 % » initial était un artefact de
+l'attaque bf16 cassée. ISA : canal hidden INFORMATIF (100 % en recherche
+discrète k-way) — la protection du texte repose uniquement sur la clé Π
+côté client. Résidu : vue gram q·k (V×V) non testée.
 
 ## Déploiement
 - Service : `https://mauceri--obfuscator-aloepri-serve.modal.run` — health 200
@@ -80,8 +82,9 @@ uniquement sur la clé Π côté client. Résidu : vues V×V non testées.
 ## Ouvert / à faire
 - **Revue de code complète** (demandée par l'utilisateur — modal_app.py en
   priorité, par un agent externe) : à faire après la précision frwiki.
-- Vues **V×V** de la Table 9 (gram q·k, W_e·W_h — 46 Go) : non testées
-  (nécessite A100-80GB/H100 ou streaming disque).
+- Vue **gram q·k** (V×V, dernière de la Table 9 — 46 Go) : non testée
+  (même approche streaming que `vma_weh_attack` possible ; la vue W_e·W_h
+  est maintenant mesurée : contrôle 100 %, défensif 0 %).
 - Benchmark de précision plus large (frwiki complet sur volume Modal, plus de
   tokens) — l'échantillon embarqué fait 4000 tokens.
 - Canal **attention** ISA sur le modèle h>0 (seul le canal hidden a été

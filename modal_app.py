@@ -1159,8 +1159,10 @@ def vma_product_full(
     La vue up est INUTILISABLE par construction : le scaling Ŝ_ffn vit sur
     `up_proj` (ffn_obfuscation.py) et RowSort élimine Ẑ (permutation) mais
     PAS Ŝ (scaling diagonal, modifie le multiset de chaque ligne) → TTRSR
-    ≈ 0 % acquis, sans rapport avec la défense. Les vues V×V (gram q·k,
-    W_e·W_h) font 46 Go — infaisables.
+    ≈ 0 % acquis, sans rapport avec la défense. La vue W_e·W_h (V×V, la
+    dernière de la Table 9) est testée par `vma_weh_attack` (streaming par
+    blocs, jamais matérialisée) — mesurée : contrôle 100 %, α_e=1,0/α_h=0,2
+    → 0 %. Reste gram q·k (V×V).
 
     Précision : les poids du volume sont en bf16, mais les produits
     W̃_e·W̃_gateᵀ sont calculés en FP32 — le chaînage P̂Q̂≈I en bf16 accumule
@@ -1340,6 +1342,203 @@ def vma_product_full(
     for view in view_list:
         print(f"  taux {view:<12}: {result[f'vote_{view}'] * 100:.2f} %", flush=True)
     print(f"  taux global     : {g:.2f} %", flush=True)
+    print(f"  ➜ {interp}", flush=True)
+    print("=" * 62, flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=10800, scaledown_window=300)
+def vma_weh_attack(
+    model_subdir: str = "qwen3-8b-ft-h128-a1-h02",
+    seed: int = 0,
+    subset_size: int = 2000,
+    sample: str = "uniform",
+    block_rows: int = 2048,
+    max_blocks: int = 0,
+):
+    """VMA vue W_e·W_h (Table 9) — la dernière vue V×V, enfin testée.
+
+    Ligne « WeWh » du papier : Y = W̃_e·W̃_headᵀ = Π·X·Πᵀ (+ bruits α_e/α_h)
+    avec X = W_e·(wnorm_finale·W_h)ᵀ (référence publique). Le chaînage
+    P̂Q̂=I élimine les clés de part et d'autre du produit ; RowSort par ligne
+    élimine Π (à droite) ; on retrouve Π par appariement cosinus des lignes
+    triées de Y (tokens testés) contre celles de X (vocabulaire clair).
+
+    La table X est V×V (V=151 936 → 46 Go bf16) : jamais matérialisée —
+    Y n'est calculé que pour `subset_size` lignes testées, et X est produit,
+    trié puis apparié PAR BLOCS de `block_rows` lignes claires. Produits en
+    FP32 (comme vma_product_full : le chaînage P̂Q̂≈I en bf16 accumule une
+    erreur qui détruit l'appariement même à α=0).
+
+    Le bruit se propage des DEUX côtés du produit (embed α_e ET head α_h) —
+    contrairement à la vue gate (embed seul) — d'où l'intérêt de la mesure :
+    α_h=0,2 (réglage papier Table 10) suffit-il, ou la vue fuit-elle plus
+    que les 8,35 % de la gate à α_e=1,0 ?
+
+    `max_blocks > 0` : traite seulement les N premiers blocs de X (calibrage
+    du coût du RowSort V×V avant le run complet).
+
+    Sortie : TTRSR (taux de récupération de Π) + tokens récupérés (pour
+    l'analyse de fréquence Zipf) + timing par étape.
+    """
+    import json
+    import random
+    import sys as _sys
+    import time
+    import urllib.request
+
+    import torch
+    from safetensors import safe_open
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from vma_product import _row_sort_chunked
+
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
+
+    def _tensors_from_dir(directory, names):
+        out = {}
+        for fname in sorted(os.listdir(directory)):
+            if not fname.endswith(".safetensors"):
+                continue
+            with safe_open(os.path.join(directory, fname),
+                           framework="pt") as fp:
+                for n in names:
+                    if n in fp.keys() and n not in out:
+                        out[n] = fp.get_tensor(n)
+        return out
+
+    # --- poids obfusqués (volume) : embed + head ---
+    t0 = time.time()
+    obf_t = _tensors_from_dir(model_dir, ["model.embed_tokens.weight",
+                                          "lm_head.weight"])
+    with open(os.path.join(model_dir, "config.json")) as f:
+        cfg = json.load(f)
+    V = cfg["vocab_size"]
+    obf_embed = obf_t["model.embed_tokens.weight"]     # (V, d2) bf16
+    obf_head = obf_t["lm_head.weight"]                  # (V, d2) bf16
+    print(f"[weh] chargé obfusqué ({model_subdir}) : embed {tuple(obf_embed.shape)}"
+          f", head {tuple(obf_head.shape)} — {time.time()-t0:.0f}s", flush=True)
+
+    # --- poids clairs (référence publique HF) : embed + head + norme finale ---
+    t0 = time.time()
+    import json as _json
+    with urllib.request.urlopen(
+            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            "model.safetensors.index.json") as r:
+        wm = _json.loads(r.read().decode())["weight_map"]
+    from huggingface_hub import hf_hub_download
+
+    def _hf_tensor(name):
+        p = hf_hub_download(SRC_MODEL, wm[name])
+        with safe_open(p, framework="pt") as fp:
+            return fp.get_tensor(name)
+
+    clear_embed = _hf_tensor("model.embed_tokens.weight")     # (V, d) bf16
+    clear_head = _hf_tensor("lm_head.weight")                  # (V, d) bf16
+    wnorm = _hf_tensor("model.norm.weight")                    # (d,)
+    print(f"[weh] chargé clair (HF {SRC_MODEL}) — {time.time()-t0:.0f}s",
+          flush=True)
+
+    # --- permutation (seed) : convention random.Random(seed).shuffle ---
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))                       # {clair: obf}
+    torch.manual_seed(seed)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # échantillonnage des tokens testés (même logique que vma_product_full)
+    if sample == "uniform":
+        test = torch.randperm(V)[:subset_size].to(dev)
+    else:
+        with open("/gepa_vocab_ids.txt") as f:
+            gepa_ids = [int(l) for l in f if l.strip()]
+        if sample == "gepa-tete":
+            chosen = gepa_ids[:subset_size]
+        elif sample == "gepa-strat":
+            head = gepa_ids[:100]
+            rest = gepa_ids[100:]
+            n_rest = subset_size - len(head)
+            idx_rest = torch.randperm(len(rest),
+                                      generator=torch.Generator()
+                                      .manual_seed(seed))[:max(0, n_rest)]
+            chosen = head + [rest[int(k)] for k in idx_rest.tolist()]
+        else:
+            raise ValueError(f"sample inconnu : {sample!r}")
+        test = torch.tensor(chosen[:subset_size], device=dev)
+    obf_rows = torch.tensor([perm[int(t)] for t in test.tolist()]).to(dev)
+    n_tok = len(test)
+    print(f"[weh] {n_tok} tokens testés (sample={sample})", flush=True)
+
+    # --- Y = W̃_e[test]·W̃_headᵀ : (N, V) FP32, puis RowSort + normalize ---
+    t0 = time.time()
+    obf_embed = obf_embed.to(dev)
+    obf_head = obf_head.to(dev)
+    Y = obf_embed[obf_rows].float() @ obf_head.float().t()    # (N, V)
+    del obf_embed, obf_head
+    Y = _row_sort_chunked(Y)
+    Y = torch.nn.functional.normalize(Y, dim=1)
+    torch.cuda.empty_cache()
+    print(f"[weh] Y ({tuple(Y.shape)}) produit+RowSort — {time.time()-t0:.0f}s",
+          flush=True)
+
+    # --- X par blocs de lignes claires : X_b = W_e[b]·(wnorm·W_h)ᵀ ---
+    # A = (wnorm ∘ W_h)ᵀ : (d, V) fp32, précalculé une fois
+    t0 = time.time()
+    clear_embed = clear_embed.to(dev)
+    A = (clear_head.float() * wnorm.float()[None, :]).t().to(dev)   # (d, V)
+    del clear_head
+    print(f"[weh] A=(wnorm·W_h)ᵀ {tuple(A.shape)} — {time.time()-t0:.0f}s",
+          flush=True)
+
+    best_sim = torch.full((n_tok,), float("-inf"), device=dev)
+    best_idx = torch.zeros(n_tok, dtype=torch.long, device=dev)
+    n_blocks = (V + block_rows - 1) // block_rows
+    t_all = time.time()
+    for b in range(n_blocks):
+        b0, b1 = b * block_rows, min((b + 1) * block_rows, V)
+        tb = time.time()
+        Xb = clear_embed[b0:b1].float() @ A                      # (B, V)
+        Xb = _row_sort_chunked(Xb)                               # RowSort
+        Xn = torch.nn.functional.normalize(Xb, dim=1)
+        sim = Y @ Xn.t()                                         # (N, B)
+        sim_max, sim_arg = sim.max(dim=1)
+        upd = sim_max > best_sim
+        if upd.any():
+            best_sim[upd] = sim_max[upd]
+            best_idx[upd] = (b0 + sim_arg)[upd]
+        del Xb, Xn, sim
+        torch.cuda.empty_cache()
+        if b % 5 == 0 or b == n_blocks - 1:
+            print(f"[weh] bloc {b+1}/{n_blocks} ({b1} lignes) — "
+                  f"{time.time()-tb:.1f}s (cumul X "
+                  f"{time.time()-t_all:.0f}s)", flush=True)
+        if max_blocks and b + 1 >= max_blocks:
+            print(f"[weh] max_blocks={max_blocks} atteint — "
+                  f"run de CALIBRAGE (temps/bloc → extrapolation)", flush=True)
+            break
+
+    rate = float((best_idx == test).float().mean().item())
+    print(f"[weh] X complet traité — {time.time()-t_all:.0f}s au total",
+          flush=True)
+
+    result = {"modele": model_subdir, "vue": "weh", "n_tokens": n_tok,
+              "block_rows": block_rows,
+              "vote_weh": round(rate, 4),
+              "tokens_recuperes": test[best_idx == test].tolist(),
+              "n_tokens_recuperes": int((best_idx == test).sum().item())}
+    print("RESULTAT_VMA_WEH " + json.dumps(result), flush=True)
+
+    g = rate * 100
+    interp = ("défense efficace : Π PAS récupérée"
+              if g < 1.0 else "défense défaillante : Π récupérée")
+    print("=" * 62, flush=True)
+    print("RÉSUMÉ — VMA vue W_e·W_h (Table 9)", flush=True)
+    print(f"  modèle : {model_subdir}", flush=True)
+    print(f"  tokens : {n_tok} (sample={sample}) | blocs X : "
+          f"{min(b + 1, n_blocks)}/{n_blocks}", flush=True)
+    print(f"  TTRSR  : {g:.2f} %", flush=True)
     print(f"  ➜ {interp}", flush=True)
     print("=" * 62, flush=True)
     return result
