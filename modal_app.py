@@ -412,6 +412,87 @@ def isa_attack(
     return result
 
 
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+def isa_vocab_attack(
+    ids: str,
+    layer: int = 18,
+    k: int = 64,
+    channel: str = "hidden",
+    teacher_forcing: bool = True,
+    metric: str = "mse",
+    seed: int = 0,
+    model_ref: str = MODEL_SUBDIR,
+):
+    """ISA DISCRÈTE (vocab-matching k-way) — variante du point 4 de la revue.
+
+    La variante par gradient (isa_attack) trouve des soft tokens dans
+    l'enveloppe convexe du simplexe qui reproduisent l'état caché sans être
+    le prompt (loss → 0,007 mais ids ≠ prompt) : elle ne permet pas de
+    conclure « canal hidden non informatif ». Ici, recherche DISCRÈTE : à
+    chaque position, le vrai token est mélangé à k−1 leurres et le canal
+    doit l'identifier (taux → 100 % si informatif, → 1/k si sous-déterminé).
+
+    `ids` : IDs PERMUTÉS du prompt secret (côté client, clé seed 0).
+    `teacher_forcing` : True = préfixe réel (borne haute, isole le canal) ;
+    False = greedy autorégressif (récupération réelle).
+    `metric` : "mse" (relatif) ou "cos" (insensible à l'échelle).
+    """
+    import json
+
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    sys.path.insert(0, "/pkg/aloepri")
+    from aloepri.isa_attack import run_vocab_match
+
+    ids = [int(x) for x in ids.split(",")]
+    if model_ref.startswith("hf:"):
+        model_dir = model_ref[len("hf:"):]
+    else:
+        model_dir = os.path.join(MODELS_DIR, model_ref)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, dtype=torch.bfloat16,
+        attn_implementation="eager").cuda().eval()
+
+    pred, rate, hit = run_vocab_match(
+        model, ids, layer=layer, k=k, channel=channel,
+        teacher_forcing=teacher_forcing, metric=metric, seed=seed,
+        device="cuda",
+    )
+    result = {
+        "channel": channel,
+        "layer": layer,
+        "k": k,
+        "teacher_forcing": teacher_forcing,
+        "metric": metric,
+        "model_ref": model_ref,
+        "ids_envoyes_au_modele": len(ids),
+        "taux_identification_kway": rate,
+        "ids_recuperes": pred.tolist(),
+    }
+    print("RESULTAT_ISA_VOCAB " + json.dumps(result), flush=True)
+
+    # résumé lisible
+    baseline = 1.0 / k
+    print("=" * 62, flush=True)
+    print("RÉSUMÉ — ISA discrète (vocab-matching k-way)", flush=True)
+    print(f"  modèle   : {model_ref}", flush=True)
+    print(f"  canal    : {channel}, couche {layer}", flush=True)
+    print(f"  k        : {k} candidats/position "
+          f"(baseline aléatoire = {baseline:.1%})", flush=True)
+    mode_txt = ("teacher-forced (borne haute)" if teacher_forcing
+               else "greedy autorégressif")
+    print(f"  mode     : {mode_txt}", flush=True)
+    print(f"  métrique : {metric}", flush=True)
+    print(f"  taux     : {rate:.1%}", flush=True)
+    interp = ("canal INFORMATIF (le vrai token est distingué)"
+              if rate > 2 * baseline else "canal sous-déterminé")
+    print(f"  ➜ {interp}", flush=True)
+    print("=" * 62, flush=True)
+    return result
+
+
 @app.function(volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
               scaledown_window=60)
 def diag():
@@ -1005,6 +1086,57 @@ def finetune_corpus(
         "minutes": round((time.time() - t0) / 60, 1),
         "model_name": model_name,
     }
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              timeout=1200, scaledown_window=60)
+def compare_embed_sources(
+    ft_ref: str = "qwen3-8b-ft-h128",
+    base_ref: str = "qwen3-8b-base-h128-a0",
+    n: int = 20000,
+    seed: int = 0,
+):
+    """Compare les embeddings de deux modèles obfusqués du volume (ligne à
+    ligne : même permutation seed 0, mêmes P̂/Q̂).
+
+    Objectif (diagnostic 2026-09-01) : vérifier que `qwen3-8b-ft-h128` a bien
+    été construit depuis le FINE-TUNÉ et non depuis la base. Si cos ≈ 1 entre
+    ft_h128 et base_h128_a0 (modulo le bruit α_e), le modèle servi est (quasi)
+    la base obfusquée → l'attaque VMA contre la référence publique le récupère
+    presque entièrement (90,8 %), sans que le fine-tuning n'ait rien apporté.
+    """
+    import random
+
+    import torch
+    from safetensors import safe_open
+
+    def _embed(subdir):
+        path = os.path.join(MODELS_DIR, subdir, "model.safetensors")
+        with safe_open(path, framework="pt") as fp:
+            return fp.get_tensor("model.embed_tokens.weight")
+
+    a = _embed(ft_ref)
+    b = _embed(base_ref)
+    torch.manual_seed(seed)
+    idx = torch.randperm(a.shape[0])[:n]
+    aa = a[idx].float()
+    bb = b[idx].float()
+    cos = (aa * bb).sum(1) / (aa.norm(dim=1) * bb.norm(dim=1) + 1e-8)
+    norm_a = aa.norm(dim=1).mean().item()
+    norm_b = bb.norm(dim=1).mean().item()
+    # mêmes lignes identiques ? (bruit α_e=0 vs 0,3 : les lignes de la base
+    # sans bruit devraient être EXACTES si le FT n'a pas été appliqué)
+    cos_moyen = float(cos.mean().item())
+    print(f"[compare] {ft_ref} vs {base_ref} — cos moyen = {cos_moyen:.4f} "
+          f"({n} lignes)", flush=True)
+    print(f"[compare] norme moyenne {ft_ref} = {norm_a:.3f} | "
+          f"{base_ref} = {norm_b:.3f}", flush=True)
+    result = {"ft_ref": ft_ref, "base_ref": base_ref, "n": n,
+              "cos_moyen": cos_moyen,
+              "norme_ft": norm_a, "norme_base": norm_b}
+    print("RESULTAT_COMPARE_EMBEDS " + __import__("json").dumps(result),
+          flush=True)
+    return result
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
