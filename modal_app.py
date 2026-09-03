@@ -2055,6 +2055,86 @@ def precision_piaf(
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
               gpu="A100-40GB", timeout=7200, scaledown_window=300,
               secrets=[modal.Secret.from_name("deepseek-api-key")])
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300)
+def piaf_generate_half(
+    mode: str = "obf",
+    seed: int = 0,
+    n_pairs: int = 150,
+    max_new_tokens: int = 80,
+    base_ref: str = "Qwen/Qwen3-8B",
+    obf_ref: str = "qwen3-8b-ft-h128-a1-h02",
+):
+    """Génération Q&A sur couples PiaF — UN modèle par passe (base OU obf).
+
+    Sépare la génération de `piaf_eval` en deux passes d'UN modèle chacune
+    (la base et l'obfusqué chargés ensemble dépassent l'A100-40GB pour le
+    14B) : les réponses sont sauvegardées en fichiers par le client, puis
+    le jugement DeepSeek se fait ensuite sans GPU (mêmes paires par seed).
+
+    mode="base" : charge `base_ref` (HF, ids clairs).
+    mode="obf"  : charge `obf_ref` (volume), ids PERMUTÉS, réponse
+                  dépermutée (perm régénérée par seed).
+
+    Retourne : [{idx, question, contexte, reference, reponse}].
+    """
+    import json
+    import random
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    assert mode in ("base", "obf"), mode
+    ref = base_ref if mode == "base" else obf_ref
+    model_dir = ref if mode == "base" else os.path.join(MODELS_DIR, ref)
+
+    tok = AutoTokenizer.from_pretrained(base_ref)
+    ds = load_dataset("AgentPublic/piaf", split="train")
+    pairs = []
+    for q, c, a in zip(ds["question"], ds["context"], ds["answers"]):
+        if q and c and a and isinstance(a, dict) and a.get("text"):
+            pairs.append((q, c, a["text"][0]))
+    rng = random.Random(seed)
+    rng.shuffle(pairs)
+    pairs = pairs[:n_pairs]
+
+    V = 151936
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))
+    unperm = {v: k for k, v in perm.items()}
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, dtype=torch.bfloat16).cuda().eval()
+
+    records = []
+    for i, (q, c, refa) in enumerate(pairs):
+        prompt = f"Question : {q}\nContexte : {c}\nRéponse :"
+        ids = tok.encode(prompt, add_special_tokens=False)
+        ids_in = [perm[i] for i in ids] if mode == "obf" else ids
+        input_ids = torch.tensor([ids_in]).cuda()
+        with torch.no_grad():
+            out = model.generate(
+                input_ids, max_new_tokens=max_new_tokens,
+                do_sample=False, pad_token_id=tok.eos_token_id)
+        gen = out[0][input_ids.shape[1]:].tolist()
+        if mode == "obf":
+            gen = [unperm.get(i, i) for i in gen]
+        reponse = tok.decode(gen, skip_special_tokens=True).strip()
+        records.append({"idx": i, "question": q, "contexte": c,
+                        "reference": refa, "reponse": reponse})
+        if (i + 1) % 25 == 0:
+            print(f"[piaf_gen:{mode}] {i+1}/{n_pairs}", flush=True)
+
+    print("RESULTAT_PIAF_GEN_" + mode.upper() + " " + json.dumps(
+        {"n": len(records)}, ensure_ascii=False), flush=True)
+    return records
+
+
 def piaf_eval(
     seed: int = 0,
     n_pairs: int = 150,
