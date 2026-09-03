@@ -56,6 +56,7 @@ TRANSFORM_IMAGE = (
     .pip_install(
         "torch", "transformers>=4.51", "numpy", "scipy",
         "safetensors", "huggingface_hub", "datasets",
+        "bitsandbytes",   # test quantification 4-bit du modèle obfusqué
     )
     .add_local_dir(_ALOEPRI_DIR, "/pkg/aloepri", copy=True)
     .add_local_file(
@@ -1799,6 +1800,7 @@ def summ_generate(
     max_new_tokens: int = 600,
     use_chat_template: bool = False,
     system: str = "",
+    quantize: bool = False,
 ):
     """Génération structurée (résumé wiki) sur le modèle OBFUSQUÉ du volume.
 
@@ -1826,9 +1828,19 @@ def summ_generate(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(SRC_MODEL)
-    model = AutoModelForCausalLM.from_pretrained(
-        os.path.join(MODELS_DIR, model_subdir),
-        dtype=torch.bfloat16).cuda().eval()
+    if quantize:
+        # test quantification : chargement 4-bit (bitsandbytes NF4) à la
+        # volée — la clé Π et la structure (lignes permutées) sont préservées.
+        from transformers import BitsAndBytesConfig
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(
+            os.path.join(MODELS_DIR, model_subdir),
+            quantization_config=bnb_cfg, device_map="cuda").eval()
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            os.path.join(MODELS_DIR, model_subdir),
+            dtype=torch.bfloat16).cuda().eval()
 
     V = model.config.vocab_size
     rng_py = random.Random(seed)
@@ -1859,6 +1871,9 @@ def summ_generate(
         print(f"[summ] {len(outs)}/{len(prompts)} — {len(outs[-1])} car.",
               flush=True)
 
+    if quantize and torch.cuda.is_available():
+        print(f"[summ] VRAM allouée (4-bit) : "
+              f"{torch.cuda.memory_allocated()/1e9:.1f} Go", flush=True)
     print("RESULTAT_SUMM_GENERATE " + json.dumps(
         {"n": len(outs), "longueurs": [len(o) for o in outs]},
         ensure_ascii=False), flush=True)
