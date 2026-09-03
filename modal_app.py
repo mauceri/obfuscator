@@ -2053,9 +2053,6 @@ def precision_piaf(
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
-              gpu="A100-40GB", timeout=7200, scaledown_window=300,
-              secrets=[modal.Secret.from_name("deepseek-api-key")])
-@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
               gpu="A100-40GB", timeout=7200, scaledown_window=300)
 def piaf_generate_half(
     mode: str = "obf",
@@ -2135,6 +2132,9 @@ def piaf_generate_half(
     return records
 
 
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300,
+              secrets=[modal.Secret.from_name("deepseek-api-key")])
 def piaf_eval(
     seed: int = 0,
     n_pairs: int = 150,
