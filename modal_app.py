@@ -1928,12 +1928,13 @@ def precision_frwiki(
         top1 = float((logits.argmax(-1) == ids[1:].cuda()).float().mean().item())
         return {"perplexite": round(2 ** loss, 2), "top1_next_token": round(top1, 4)}
 
-    # la base est chargée depuis HF (réf. publique) ; ft et obf depuis le volume
-    result = {
-        "base": _metrics(base_ref),
-        "ft": _metrics(os.path.join(MODELS_DIR, ft_ref)),
-        "ft_obf_h128": _metrics(os.path.join(MODELS_DIR, obf_ref), perm=perm),
-    }
+    # la base est chargée depuis HF (réf. publique) ; ft et obf depuis le
+    # volume. ft_ref="" → pas de fine-tuné (colonne omise).
+    result = {"base": _metrics(base_ref)}
+    if ft_ref:
+        result["ft"] = _metrics(os.path.join(MODELS_DIR, ft_ref))
+    result["ft_obf_h128"] = _metrics(
+        os.path.join(MODELS_DIR, obf_ref), perm=perm)
     print("RESULTAT_PRECISION_FRWIKI " + json.dumps(result), flush=True)
     return result
 
@@ -2014,11 +2015,11 @@ def precision_piaf(
         top1 = float((logits.argmax(-1) == ids[1:].cuda()).float().mean().item())
         return {"perplexite": round(2 ** loss, 2), "top1_next_token": round(top1, 4)}
 
-    result = {
-        "base": _metrics(base_ref),
-        "ft": _metrics(os.path.join(MODELS_DIR, ft_ref)),
-        "ft_obf_h128": _metrics(os.path.join(MODELS_DIR, obf_ref), perm=perm),
-    }
+    result = {"base": _metrics(base_ref)}
+    if ft_ref:
+        result["ft"] = _metrics(os.path.join(MODELS_DIR, ft_ref))
+    result["ft_obf_h128"] = _metrics(
+        os.path.join(MODELS_DIR, obf_ref), perm=perm)
     print("RESULTAT_PRECISION_PIAF " + json.dumps(result), flush=True)
     return result
 
