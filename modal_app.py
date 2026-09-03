@@ -1156,13 +1156,29 @@ def vma_product_full(
     """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + agrégation.
 
     Le maximum réalisable à V=151 936 sur A100-40GB : la vue V×inter gate.
-    La vue up est INUTILISABLE par construction : le scaling Ŝ_ffn vit sur
-    `up_proj` (ffn_obfuscation.py) et RowSort élimine Ẑ (permutation) mais
-    PAS Ŝ (scaling diagonal, modifie le multiset de chaque ligne) → TTRSR
-    ≈ 0 % acquis, sans rapport avec la défense. La vue W_e·W_h (V×V, la
-    dernière de la Table 9) est testée par `vma_weh_attack` (streaming par
-    blocs, jamais matérialisée) — mesurée : contrôle 100 %, α_e=1,0/α_h=0,2
-    → 0 %. Reste gram q·k (V×V).
+    COUVERTURE DES VUES DE LA TABLE 9 (état 2026-09-02) :
+
+    | Vue | Structure Y = | Statut | Pourquoi |
+    |---|---|---|---|
+    | W_e·W_gate | Π·W*_e·W_gate·Ẑ_ffn | ✅ testée (cette fonction) | Ẑ (permutation) éliminé par RowSort — contrôle 99,95 % |
+    | W_e·W_h | Π·W*_e·W_h·Πᵀ | ✅ testée (`vma_weh_attack`) | embed×head, V×V en streaming — contrôle 100 %, défensif 0 % |
+    | W_e·W_up | Π·W*_e·W_up·Ŝ_ffn·Ẑ_ffn | ❌ écartée | Ŝ_ffn (scaling diagonal sur up_proj) N'EST PAS éliminé par RowSort → TTRSR ≈ 0 % acquis, sans rapport avec la défense |
+    | W_down·W_h | Ẑ⁻¹·Ŝ⁻¹·W_down·W*_h·Πᵀ | ❌ écartée | porte Π sur les COLONNES : RowSort détruirait l'information à récupérer |
+    | gram q·k | Π·W*_e·W_q·(Π·W*_e·W_k)ᵀ | ⏸️ en réserve | V×V (46 Go), deux produits croisés — non testée |
+    | W_e·W_router | Π·W*_e·norm(W_router)·Ẑ_router | ➖ sans objet | MoE-only — Qwen3-8B dense |
+
+    La vue up est donc INUTILISABLE par construction : le scaling Ŝ_ffn vit
+    sur `up_proj` (ffn_obfuscation.py) et RowSort élimine Ẑ (permutation)
+    mais PAS Ŝ (scaling diagonal, modifie le multiset de chaque ligne) →
+    TTRSR ≈ 0 % acquis, sans rapport avec la défense.
+
+    VOTE COMBINÉ : les vues testées peuvent être additionnées
+    (`vma_combined_attack`) — chaque vue normalisée par z-score par ligne
+    sur les V candidats (monotone → taux par vue inchangés), puis somme
+    50/50 avant l'argmax. MESURÉ (2026-09-02) sur le défensif
+    α_e=1,0/α_h=0,2 : gate 8,35 % / We·Wh 0 % / **combiné 6,55 %** — la
+    vue gate seule reste la plus forte (We·Wh = bruit pur à ce réglage,
+    il dilue le signal au lieu de l'ajouter). Contrôle : 100 %.
 
     Précision : les poids du volume sont en bf16, mais les produits
     W̃_e·W̃_gateᵀ sont calculés en FP32 — le chaînage P̂Q̂≈I en bf16 accumule
@@ -1381,6 +1397,12 @@ def vma_weh_attack(
 
     Sortie : TTRSR (taux de récupération de Π) + tokens récupérés (pour
     l'analyse de fréquence Zipf) + timing par étape.
+
+    Vote combiné : cette vue peut être additionnée à la gate dans
+    `vma_combined_attack` (z-score par ligne puis somme 50/50). MESURÉ
+    (2026-09-02) : contrôle 100 % ; au défensif α_e=1,0/α_h=0,2 la vue est
+    du bruit pur (0 %) et le combiné (6,55 %) reste SOUS la gate seule
+    (8,35 %) — voir la carte des vues dans la docstring de vma_product_full.
     """
     import json
     import random
@@ -1568,6 +1590,12 @@ def vma_combined_attack(
     séparés (contrôle ~99,95 %/~100 %, défensif ~8,35 %/~0 %) — et il
     équilibre les échelles (gate cumule 36 couches, weh une seule) avant la
     somme 50/50.
+
+    MESURÉ (2026-09-02, 2000 tokens uniformes) : contrôle base-h128-a0 →
+    gate 99,95 % / We·Wh 100 % / combiné 100 % ; défensif
+    qwen3-8b-ft-h128-a1-h02 (α_e=1,0/α_h=0,2) → gate 8,35 % / We·Wh 0 % /
+    **combiné 6,55 %** — la vue gate seule reste la plus forte (We·Wh =
+    bruit pur à ce réglage, il dilue le signal au lieu de l'ajouter).
 
     Sortie : vote_gate, vote_weh, vote_combined (TTRSR) + tokens récupérés
     du vote combiné.
