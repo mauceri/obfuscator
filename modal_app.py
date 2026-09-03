@@ -2077,6 +2077,7 @@ def piaf_generate_half(
     """
     import json
     import random
+    import sys as _sys
 
     import torch
 
