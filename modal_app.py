@@ -1797,18 +1797,24 @@ def summ_generate(
     model_subdir: str = "qwen3-8b-ft-h128-a1-h02",
     seed: int = 0,
     max_new_tokens: int = 600,
+    use_chat_template: bool = False,
+    system: str = "",
 ):
     """Génération structurée (résumé wiki) sur le modèle OBFUSQUÉ du volume.
 
-    Le modèle obfusqué (base Qwen3-8B FT GEPA, α_e=1,0) génère par
-    CONTINUATION — pas de chat template : les tokens spéciaux du template
-    seraient permutés comme le reste du vocabulaire, ce qui casserait
-    l'encodage. Chaque prompt (texte + amorce de format wiki) est tokenisé,
-    ses ids PERMUTÉS (perm régénérée par seed, jamais envoyée ailleurs que
-    dans ce conteneur de génération), la sortie est dépermutée puis décodée.
+    Le modèle obfusqué génère par CONTINUATION ou par CHAT TEMPLATE.
 
-    Usage (benchmark résumé Wiki_LM) : le client construit les prompts
-    « Texte : …\n\n## Résumé\n » et récupère les continuations markdown.
+    Par défaut (continuation) : le prompt est tokenisé sans tokens spéciaux.
+    Avec `use_chat_template=True` (recommandé pour un modèle instruct
+    Qwen3) : `apply_chat_template(enable_thinking=False)` — le template
+    insère un bloc <think></think> vide qui désactive le raisonnement du
+    Qwen3 chat (sinon il « pense » à voix haute en génération libre).
+    Les ids (spéciaux compris) sont PERMUTÉS — la permutation préserve la
+    sémantique du traitement ; la sortie est dépermutée puis décodée.
+
+    Usage (benchmark résumé Wiki_LM) : prompts = contenu USER, `system` =
+    consigne système, use_chat_template=True → résumés structurés sans
+    raisonnement parasite.
     """
     import json
     import random
@@ -1833,7 +1839,14 @@ def summ_generate(
 
     outs = []
     for text in prompts:
-        ids = tok.encode(text, add_special_tokens=False)
+        if use_chat_template:
+            msgs = [{"role": "system", "content": system},
+                    {"role": "user", "content": text}]
+            ids = tok.apply_chat_template(
+                msgs, add_generation_prompt=True, tokenize=True,
+                return_dict=False, enable_thinking=False)
+        else:
+            ids = tok.encode(text, add_special_tokens=False)
         ids_in = [perm[i] for i in ids]
         input_ids = torch.tensor([ids_in]).cuda()
         with torch.no_grad():
