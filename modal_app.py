@@ -723,10 +723,10 @@ def vma_attack(subset_size: int = 2000, seed: int = 0,
     return result
 
 
-@app.function(image=TRANSFORM_IMAGE, memory=49152,
+@app.function(image=TRANSFORM_IMAGE, memory=131072,
               ephemeral_disk=TRANSFORM_EPHEMERAL_DISK,
               volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
-              timeout=10800, scaledown_window=300)
+              timeout=14400, scaledown_window=300)
 def transform_chained(
     seed: int = 0,
     alpha_e: float = 0.3,
@@ -751,8 +751,10 @@ def transform_chained(
 
     Sortie : modèle obfusqué (hidden d+2h) sous
     `{MODELS_DIR}/{out_subdir}` + clés sur le Volume `obfuscator-keys`.
-    Mémoire : modèle clair bf16 (~16 Go) + obfusqué bf16 (~17,5 Go) +
-    transitoires fp64 → 48 Go demandés.
+    Mémoire : modèle clair bf16 (~16 Go pour le 8B, ~28 Go pour le 14B) +
+    obfusqué bf16 (~17,5/30 Go) + transitoires fp64 → 128 Go demandés
+    (couvre le 8B ET le 14B ; re-abaisser à 49152 pour ne transformer que
+    le 8B et réduire le coût CPU).
     """
     import json
     import sys as _sys
@@ -805,6 +807,7 @@ def verify_chained(
     seed: int = 0,
     h: int = 128,
     n_prompts: int = 8,
+    base_ref: str = SRC_MODEL,
 ):
     """Contrôle qualité du modèle chaîné h>0 (le round-trip est APPROXIMATIF :
     erreur κ §5.2.5 — pas de vérification bit-à-bit).
@@ -827,9 +830,9 @@ def verify_chained(
         model_dir, dtype=torch.bfloat16,
         attn_implementation="eager").cuda().eval()
     clear = AutoModelForCausalLM.from_pretrained(
-        SRC_MODEL, dtype=torch.bfloat16,
+        base_ref, dtype=torch.bfloat16,
         attn_implementation="eager").cuda().eval()
-    tok = AutoTokenizer.from_pretrained(SRC_MODEL)
+    tok = AutoTokenizer.from_pretrained(base_ref)
 
     import random as _random
     rng_py = _random.Random(seed)
@@ -1152,6 +1155,7 @@ def vma_product_full(
     subset_size: int = 2000,
     views: str = "gate",
     sample: str = "uniform",
+    clear_ref: str = SRC_MODEL,
 ):
     """VMA produit GRANDEUR NATURE (Table 9) : toutes les couches + agrégation.
 
@@ -1227,12 +1231,12 @@ def vma_product_full(
     # embed clair + poids clairs (HF, sélectif)
     import json as _json
     with urllib.request.urlopen(
-            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            f"https://huggingface.co/{clear_ref}/resolve/main/"
             "model.safetensors.index.json") as r:
         wm = _json.loads(r.read().decode())["weight_map"]
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(SRC_MODEL, wm["model.embed_tokens.weight"])
+    path = hf_hub_download(clear_ref, wm["model.embed_tokens.weight"])
     with safe_open(path, framework="pt") as fp:
         clear_embed = fp.get_tensor("model.embed_tokens.weight")
 
@@ -1285,7 +1289,7 @@ def vma_product_full(
         for n in (f"model.layers.{i}.mlp.gate_proj.weight",
                   f"model.layers.{i}.mlp.up_proj.weight",
                   f"model.layers.{i}.post_attention_layernorm.weight"):
-            p = hf_hub_download(SRC_MODEL, wm[n])
+            p = hf_hub_download(clear_ref, wm[n])
             with safe_open(p, framework="pt") as fp:
                 clr[n] = fp.get_tensor(n).to(dev)
         wn = clr[f"model.layers.{i}.post_attention_layernorm.weight"]
@@ -1372,6 +1376,7 @@ def vma_weh_attack(
     sample: str = "uniform",
     block_rows: int = 2048,
     max_blocks: int = 0,
+    clear_ref: str = SRC_MODEL,
 ):
     """VMA vue W_e·W_h (Table 9) — la dernière vue V×V, enfin testée.
 
@@ -1446,20 +1451,20 @@ def vma_weh_attack(
     t0 = time.time()
     import json as _json
     with urllib.request.urlopen(
-            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            f"https://huggingface.co/{clear_ref}/resolve/main/"
             "model.safetensors.index.json") as r:
         wm = _json.loads(r.read().decode())["weight_map"]
     from huggingface_hub import hf_hub_download
 
     def _hf_tensor(name):
-        p = hf_hub_download(SRC_MODEL, wm[name])
+        p = hf_hub_download(clear_ref, wm[name])
         with safe_open(p, framework="pt") as fp:
             return fp.get_tensor(name)
 
     clear_embed = _hf_tensor("model.embed_tokens.weight")     # (V, d) bf16
     clear_head = _hf_tensor("lm_head.weight")                  # (V, d) bf16
     wnorm = _hf_tensor("model.norm.weight")                    # (d,)
-    print(f"[weh] chargé clair (HF {SRC_MODEL}) — {time.time()-t0:.0f}s",
+    print(f"[weh] chargé clair (HF {clear_ref}) — {time.time()-t0:.0f}s",
           flush=True)
 
     # --- permutation (seed) : convention random.Random(seed).shuffle ---
@@ -1574,6 +1579,7 @@ def vma_combined_attack(
     subset_size: int = 2000,
     sample: str = "uniform",
     block_rows: int = 2048,
+    clear_ref: str = SRC_MODEL,
 ):
     """VMA COMBINÉE (Table 9) — la plus forte attaque mesurable : gate + W_e·W_h.
 
@@ -1643,13 +1649,13 @@ def vma_combined_attack(
     # --- poids clairs (référence publique HF) ---
     import json as _json
     with urllib.request.urlopen(
-            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            f"https://huggingface.co/{clear_ref}/resolve/main/"
             "model.safetensors.index.json") as r:
         wm = _json.loads(r.read().decode())["weight_map"]
     from huggingface_hub import hf_hub_download
 
     def _hf_tensor(name):
-        p = hf_hub_download(SRC_MODEL, wm[name])
+        p = hf_hub_download(clear_ref, wm[name])
         with safe_open(p, framework="pt") as fp:
             return fp.get_tensor(name)
 
@@ -1701,7 +1707,7 @@ def vma_combined_attack(
         clr = {}
         for n in (f"model.layers.{i}.mlp.gate_proj.weight",
                   f"model.layers.{i}.post_attention_layernorm.weight"):
-            p = hf_hub_download(SRC_MODEL, wm[n])
+            p = hf_hub_download(clear_ref, wm[n])
             with safe_open(p, framework="pt") as fp:
                 clr[n] = fp.get_tensor(n).to(dev)
         wn = clr[f"model.layers.{i}.post_attention_layernorm.weight"]
@@ -1782,6 +1788,68 @@ def vma_combined_attack(
     print(f"  ➜ {interp}", flush=True)
     print("=" * 62, flush=True)
     return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=7200, scaledown_window=300)
+def summ_generate(
+    prompts: list[str],
+    model_subdir: str = "qwen3-8b-ft-h128-a1-h02",
+    seed: int = 0,
+    max_new_tokens: int = 600,
+):
+    """Génération structurée (résumé wiki) sur le modèle OBFUSQUÉ du volume.
+
+    Le modèle obfusqué (base Qwen3-8B FT GEPA, α_e=1,0) génère par
+    CONTINUATION — pas de chat template : les tokens spéciaux du template
+    seraient permutés comme le reste du vocabulaire, ce qui casserait
+    l'encodage. Chaque prompt (texte + amorce de format wiki) est tokenisé,
+    ses ids PERMUTÉS (perm régénérée par seed, jamais envoyée ailleurs que
+    dans ce conteneur de génération), la sortie est dépermutée puis décodée.
+
+    Usage (benchmark résumé Wiki_LM) : le client construit les prompts
+    « Texte : …\n\n## Résumé\n » et récupère les continuations markdown.
+    """
+    import json
+    import random
+    import sys as _sys
+
+    import torch
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(SRC_MODEL)
+    model = AutoModelForCausalLM.from_pretrained(
+        os.path.join(MODELS_DIR, model_subdir),
+        dtype=torch.bfloat16).cuda().eval()
+
+    V = model.config.vocab_size
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))
+    unperm = {v: k for k, v in perm.items()}
+
+    outs = []
+    for text in prompts:
+        ids = tok.encode(text, add_special_tokens=False)
+        ids_in = [perm[i] for i in ids]
+        input_ids = torch.tensor([ids_in]).cuda()
+        with torch.no_grad():
+            out = model.generate(
+                input_ids, max_new_tokens=max_new_tokens,
+                do_sample=False, pad_token_id=tok.eos_token_id)
+        gen = out[0][input_ids.shape[1]:].tolist()
+        gen = [unperm.get(i, i) for i in gen]
+        outs.append(tok.decode(gen, skip_special_tokens=True).strip())
+        print(f"[summ] {len(outs)}/{len(prompts)} — {len(outs[-1])} car.",
+              flush=True)
+
+    print("RESULTAT_SUMM_GENERATE " + json.dumps(
+        {"n": len(outs), "longueurs": [len(o) for o in outs]},
+        ensure_ascii=False), flush=True)
+    return outs
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
