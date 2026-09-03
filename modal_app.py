@@ -56,7 +56,7 @@ TRANSFORM_IMAGE = (
     .pip_install(
         "torch", "transformers>=4.51", "numpy", "scipy",
         "safetensors", "huggingface_hub", "datasets",
-        "bitsandbytes",   # test quantification 4-bit du modèle obfusqué
+        "bitsandbytes", "accelerate",   # quantification 4-bit (device_map)
     )
     .add_local_dir(_ALOEPRI_DIR, "/pkg/aloepri", copy=True)
     .add_local_file(
