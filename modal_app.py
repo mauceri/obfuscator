@@ -1545,6 +1545,218 @@ def vma_weh_attack(
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
+              gpu="A100-40GB", timeout=10800, scaledown_window=300)
+def vma_combined_attack(
+    model_subdir: str = "qwen3-8b-ft-h128-a1-h02",
+    seed: int = 0,
+    subset_size: int = 2000,
+    sample: str = "uniform",
+    block_rows: int = 2048,
+):
+    """VMA COMBINÉE (Table 9) — la plus forte attaque mesurable : gate + W_e·W_h.
+
+    Les deux vues testées sont combinées en un seul vote avant l'argmax :
+      S_gate = cumul sur les 36 couches des similarités z-score (par bloc de
+               8192 candidats — logique EXACTE de vma_product_full) ;
+      S_weh  = similarités cosinus de la vue W_e·W_h (embed×head, V×V en
+               streaming par blocs — logique de vma_weh_attack) ;
+      vote   = zscore_ligne(S_gate) + zscore_ligne(S_weh) → argmax global.
+
+    Le z-score final par ligne (sur les V candidats) est une transformation
+    monotone : il ne change PAS l'argmax de chaque vue seule — les taux
+    vote_gate / vote_weh rapportés ici doivent donc retomber sur les runs
+    séparés (contrôle ~99,95 %/~100 %, défensif ~8,35 %/~0 %) — et il
+    équilibre les échelles (gate cumule 36 couches, weh une seule) avant la
+    somme 50/50.
+
+    Sortie : vote_gate, vote_weh, vote_combined (TTRSR) + tokens récupérés
+    du vote combiné.
+    """
+    import json
+    import random
+    import sys as _sys
+    import time
+    import urllib.request
+
+    import torch
+    from safetensors import safe_open
+
+    _sys.path.insert(0, "/pkg/aloepri")
+    from vma_product import _row_sort_chunked
+
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
+
+    def _tensors_from_dir(directory, names):
+        out = {}
+        for fname in sorted(os.listdir(directory)):
+            if not fname.endswith(".safetensors"):
+                continue
+            with safe_open(os.path.join(directory, fname),
+                           framework="pt") as fp:
+                for n in names:
+                    if n in fp.keys() and n not in out:
+                        out[n] = fp.get_tensor(n)
+        return out
+
+    def _zscore_rows(s):
+        return ((s - s.mean(dim=1, keepdim=True))
+                / (s.std(dim=1, keepdim=True) + 1e-6))
+
+    # --- poids obfusqués (volume) : embed + head ---
+    obf_t = _tensors_from_dir(model_dir, ["model.embed_tokens.weight",
+                                          "lm_head.weight"])
+    with open(os.path.join(model_dir, "config.json")) as f:
+        cfg = json.load(f)
+    V = cfg["vocab_size"]
+    n_layers = cfg["num_hidden_layers"]
+    obf_embed = obf_t["model.embed_tokens.weight"]     # (V, d2) bf16
+    obf_head = obf_t["lm_head.weight"]                  # (V, d2) bf16
+
+    # --- poids clairs (référence publique HF) ---
+    import json as _json
+    with urllib.request.urlopen(
+            f"https://huggingface.co/{SRC_MODEL}/resolve/main/"
+            "model.safetensors.index.json") as r:
+        wm = _json.loads(r.read().decode())["weight_map"]
+    from huggingface_hub import hf_hub_download
+
+    def _hf_tensor(name):
+        p = hf_hub_download(SRC_MODEL, wm[name])
+        with safe_open(p, framework="pt") as fp:
+            return fp.get_tensor(name)
+
+    clear_embed = _hf_tensor("model.embed_tokens.weight")
+    clear_head = _hf_tensor("lm_head.weight")
+    wnorm_fin = _hf_tensor("model.norm.weight")
+
+    # --- permutation (seed) + échantillonnage (même logique que les runs) ---
+    rng_py = random.Random(seed)
+    permuted = list(range(V))
+    rng_py.shuffle(permuted)
+    perm = dict(zip(range(V), permuted))
+    torch.manual_seed(seed)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if sample == "uniform":
+        test = torch.randperm(V)[:subset_size].to(dev)
+    else:
+        with open("/gepa_vocab_ids.txt") as f:
+            gepa_ids = [int(l) for l in f if l.strip()]
+        if sample == "gepa-tete":
+            chosen = gepa_ids[:subset_size]
+        elif sample == "gepa-strat":
+            head_ids = gepa_ids[:100]
+            rest = gepa_ids[100:]
+            n_rest = subset_size - len(head_ids)
+            idx_rest = torch.randperm(len(rest),
+                                      generator=torch.Generator()
+                                      .manual_seed(seed))[:max(0, n_rest)]
+            chosen = head_ids + [rest[int(k)] for k in idx_rest.tolist()]
+        else:
+            raise ValueError(f"sample inconnu : {sample!r}")
+        test = torch.tensor(chosen[:subset_size], device=dev)
+    obf_rows = torch.tensor([perm[int(t)] for t in test.tolist()]).to(dev)
+    n_tok = len(test)
+    print(f"[combined] {n_tok} tokens testés (sample={sample}) sur "
+          f"{model_subdir} — {n_layers} couches", flush=True)
+
+    obf_embed = obf_embed.to(dev)
+    obf_head = obf_head.to(dev)
+    clear_embed = clear_embed.to(dev)
+
+    # ============ VUE GATE (36 couches) ============
+    t0 = time.time()
+    S_gate = torch.zeros(n_tok, V, dtype=torch.float32, device=dev)
+    for i in range(n_layers):
+        obf_w = _tensors_from_dir(
+            model_dir, [f"model.layers.{i}.mlp.gate_proj.weight"])
+        clr = {}
+        for n in (f"model.layers.{i}.mlp.gate_proj.weight",
+                  f"model.layers.{i}.post_attention_layernorm.weight"):
+            p = hf_hub_download(SRC_MODEL, wm[n])
+            with safe_open(p, framework="pt") as fp:
+                clr[n] = fp.get_tensor(n).to(dev)
+        wn = clr[f"model.layers.{i}.post_attention_layernorm.weight"]
+        g_obf = obf_w[f"model.layers.{i}.mlp.gate_proj.weight"].to(dev).float()
+        g_clair = (clr[f"model.layers.{i}.mlp.gate_proj.weight"]
+                   * wn[None, :]).float()
+        Y = obf_embed[obf_rows].float() @ g_obf.t()          # (N, inter)
+        Y = _row_sort_chunked(Y)
+        X = torch.empty(V, g_clair.shape[0],
+                        dtype=torch.float32, device=dev)
+        for c0 in range(0, V, 8192):
+            c1 = min(c0 + 8192, V)
+            X[c0:c1] = clear_embed[c0:c1].float() @ g_clair.t()
+        X = _row_sort_chunked(X)
+        q = torch.nn.functional.normalize(Y, dim=1)
+        t = torch.nn.functional.normalize(X, dim=1)
+        for c0 in range(0, V, 8192):
+            c1 = min(c0 + 8192, V)
+            sim = q @ t[c0:c1].t()                           # (N, 8192)
+            sim = _zscore_rows(sim)                          # z-score par bloc
+            S_gate[:, c0:c1] += sim
+        rate = float((S_gate.argmax(dim=1) == test)
+                     .float().mean().item())
+        print(f"[combined] gate couche {i+1}/{n_layers} — "
+              f"TTRSR cumulé {rate:.1%}", flush=True)
+        del X, Y, q, t, sim, obf_w, clr
+        torch.cuda.empty_cache()
+    print(f"[combined] vue GATE terminée ({time.time()-t0:.0f}s) — "
+          f"TTRSR(gate) {rate:.1%}", flush=True)
+
+    # ============ VUE W_e·W_h ============
+    t0 = time.time()
+    Yw = obf_embed[obf_rows].float() @ obf_head.float().t()  # (N, V)
+    del obf_embed, obf_head
+    Yw = _row_sort_chunked(Yw)
+    Yw = torch.nn.functional.normalize(Yw, dim=1)
+    A = (clear_head.float() * wnorm_fin.float()[None, :]).t().to(dev)
+    del clear_head
+    S_weh = torch.zeros(n_tok, V, dtype=torch.float32, device=dev)
+    n_blocks = (V + block_rows - 1) // block_rows
+    for b in range(n_blocks):
+        b0, b1 = b * block_rows, min((b + 1) * block_rows, V)
+        Xb = clear_embed[b0:b1].float() @ A                   # (B, V)
+        Xb = _row_sort_chunked(Xb)
+        Xn = torch.nn.functional.normalize(Xb, dim=1)
+        S_weh[:, b0:b1] = Yw @ Xn.t()                         # cos brut
+        del Xb, Xn
+        torch.cuda.empty_cache()
+    print(f"[combined] vue W_e·W_h terminée ({time.time()-t0:.0f}s)", flush=True)
+
+    # ============ VOTE COMBINÉ ============
+    S_comb = _zscore_rows(S_gate) + _zscore_rows(S_weh)
+    pred_gate = S_gate.argmax(dim=1)
+    pred_weh = S_weh.argmax(dim=1)
+    pred_comb = S_comb.argmax(dim=1)
+    rate_gate = float((pred_gate == test).float().mean().item())
+    rate_weh = float((pred_weh == test).float().mean().item())
+    rate_comb = float((pred_comb == test).float().mean().item())
+
+    result = {"modele": model_subdir, "n_tokens": n_tok, "sample": sample,
+              "vote_gate": round(rate_gate, 4),
+              "vote_weh": round(rate_weh, 4),
+              "vote_combined": round(rate_comb, 4),
+              "n_tokens_recuperes": int((pred_comb == test).sum().item()),
+              "tokens_recuperes": test[pred_comb == test].tolist()}
+    print("RESULTAT_VMA_COMBINED " + json.dumps(result), flush=True)
+
+    g = rate_comb * 100
+    interp = ("défense efficace : Π PAS récupérée"
+              if g < 1.0 else "défense défaillante : Π récupérée")
+    print("=" * 62, flush=True)
+    print("RÉSUMÉ — VMA COMBINÉE gate + W_e·W_h (Table 9)", flush=True)
+    print(f"  modèle : {model_subdir}", flush=True)
+    print(f"  tokens : {n_tok} (sample={sample})", flush=True)
+    print(f"  gate seul    : {rate_gate * 100:.2f} %", flush=True)
+    print(f"  We·Wh seul   : {rate_weh * 100:.2f} %", flush=True)
+    print(f"  COMBINÉ      : {g:.2f} %", flush=True)
+    print(f"  ➜ {interp}", flush=True)
+    print("=" * 62, flush=True)
+    return result
+
+
+@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
               gpu="A100-40GB", timeout=3600, scaledown_window=300)
 def precision_frwiki(
     seed: int = 0,
