@@ -801,7 +801,7 @@ def transform_chained(
 
 
 @app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol},
-              gpu="A100-40GB", timeout=3600, scaledown_window=300)
+              gpu="A100-80GB", timeout=3600, scaledown_window=300)
 def verify_chained(
     model_subdir: str = "qwen3-8b-obf-h128",
     seed: int = 0,
