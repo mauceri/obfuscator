@@ -39,6 +39,7 @@ CLI Modal : `~/modal-venv/bin/modal`.
 | **VMA produit 8B FT+h>0 — courbe α_e (01/09, attaque corrigée)** | α_e=0,01 → 99,95 % ; **α_e=0,3 → 90,8 %** ; **α_e=1,0 → 8,35 %** | notebook cellule 35 |
 | **VMA vue W_e·W_h 8B (02/09, dernière vue V×V de la Table 9)** | contrôle α=0 → **100 %** (chemin validé) ; défensif α_e=1,0/α_h=0,2 → **0 %** (0/2000) — bruit des deux côtés du produit | notebook cellule 35 (10.3b) |
 | **VMA combinée 8B (02/09, vote gate + W_e·W_h)** | contrôle → **100 %** ; défensif : gate 8,35 % / We·Wh 0 % / **combiné 6,55 %** — la gate seule reste la vue la plus forte | notebook cellule 35 (10.3c) |
+| **Qwen3-14B obfusqué direct (03/09, sans FT)** | verify corr 0,96-0,98 ; VMA gate **10,5 %** / We·Wh **0 %** / combiné 7,05 % ; **frwiki +6,8 %** (vs +13-21 % 8B) ; résumés fidélité 4,83 / couverture 4,50 (structure 2,33 — thinking Qwen3 à traiter) | notebook cellule 35 (10.7) |
 | Fine-tuning + bruit (0.6B, α=0.3) | 2,0 % (le FT est un filet, pas une défense seule) | `vma_produit_8b_complet.md` |
 | ISA hidden couche 18 (8B h>0) | **0 % par gradient (artefact) ; 100 % en recherche discrète (k-way)** → canal hidden INFORMATIF | notebook cellule 35 |
 | ISA canal attn 0.6B | sous-déterminé : 0 % même baseline (canal hidden : 88,9 %) | `isa_report.md` |
