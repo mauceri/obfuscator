@@ -88,7 +88,11 @@ SERVE_IMAGE = (
 )
 
 models_vol = modal.Volume.from_name(MODEL_VOL, create_if_missing=True)
-keys_vol = modal.Volume.from_name(KEYS_VOL, create_if_missing=True)
+keys_vol = modal.Volume.from_name(KEYS_VOL, create_if_missing=False)
+# create_if_missing=False : le volume de clés ne doit JAMAIS être recréé
+# silencieusement (posture : clés côté client uniquement). Si une
+# transformation doit être relancée, recréer le volume explicitement puis
+# le supprimer après récupération des clés.
 
 try:
     API_SECRET = modal.Secret.from_name("aloepri-api-key")
