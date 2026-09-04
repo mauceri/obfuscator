@@ -123,6 +123,7 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
                                 detail=f"Modal /generate: {resp.status_code} "
                                        f"{resp.text[:300]}")
         out_ids = resp.json()["output_ids"]
+        server_time_ms = resp.json().get("server_time_ms")
         # 4. dépermutation + décodage côté client
         completion = out_ids[len(permuted):]
         text = tokenizer.decode(
@@ -166,6 +167,7 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
                 "prompt_tokens": len(clear_ids),
                 "completion_tokens": len(completion),
                 "total_tokens": len(clear_ids) + len(completion),
+                "server_time_ms": server_time_ms,
             },
         }
 

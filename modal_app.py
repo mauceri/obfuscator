@@ -315,6 +315,8 @@ def serve():
 
     class GenerateResponse(BaseModel):
         output_ids: list[int]
+        # temps GPU de génération (ms) — pour le compteur de coût côté client
+        server_time_ms: float | None = None
 
     def _authorized(authorization: str | None) -> bool:
         # Fail-closed : sans clé attendue configurée (env `ALOEPRI_API_KEY`
@@ -346,13 +348,16 @@ def serve():
         if req.stop_token_id is not None:
             gen_kwargs["eos_token_id"] = req.stop_token_id
             gen_kwargs["pad_token_id"] = req.stop_token_id
+        import time as _time
+        t0 = _time.time()
         with torch.no_grad():
             output = model.generate(
                 input_tensor,
                 max_new_tokens=min(req.max_new_tokens, 2048),  # clamp défensif
                 do_sample=False, **gen_kwargs,
             )
-        return GenerateResponse(output_ids=output[0].tolist())
+        return GenerateResponse(output_ids=output[0].tolist(),
+                               server_time_ms=(_time.time() - t0) * 1000)
 
     return fastapi_app
 
