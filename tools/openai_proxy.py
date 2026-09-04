@@ -103,6 +103,8 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
             # serveur : un simple id à ne pas émettre)
             "bad_words_ids": [[codec.permutation[THINK_CLEAR_ID]]],
         }
+        # token d'arrêt = <|im_end|> (151645) exprimé dans l'espace permuté
+        payload["stop_token_id"] = codec.permutation[151645]
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

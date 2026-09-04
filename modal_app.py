@@ -312,6 +312,11 @@ def serve():
         max_new_tokens: int = Field(default=100, ge=1, le=2048)
         repetition_penalty: float = 1.0
         bad_words_ids: list[list[int]] | None = None
+        # token d'ARRÊT exprimé dans l'espace PERMUTÉ (ex. <|im_end|>) : le
+        # client, qui détient la clé, le fournit — sinon generate ne s'arrête
+        # jamais (l'eos du config est l'id clair, jamais émis par le modèle
+        # obfusqué) et dérive jusqu'à max_new_tokens.
+        stop_token_id: int | None = None
 
     class GenerateResponse(BaseModel):
         output_ids: list[int]
@@ -342,11 +347,15 @@ def serve():
             kwargs["repetition_penalty"] = req.repetition_penalty
         if req.bad_words_ids:
             kwargs["bad_words_ids"] = req.bad_words_ids
+        gen_kwargs = dict(kwargs)
+        if req.stop_token_id is not None:
+            gen_kwargs["eos_token_id"] = req.stop_token_id
+            gen_kwargs["pad_token_id"] = req.stop_token_id
         with torch.no_grad():
             output = model.generate(
                 input_tensor,
                 max_new_tokens=min(req.max_new_tokens, 2048),  # clamp défensif
-                do_sample=False, **kwargs,
+                do_sample=False, **gen_kwargs,
             )
         return GenerateResponse(output_ids=output[0].tolist())
 
@@ -1862,10 +1871,14 @@ def summ_generate(
             ids = tok.encode(text, add_special_tokens=False)
         ids_in = [perm[i] for i in ids]
         input_ids = torch.tensor([ids_in]).cuda()
+        # le token d'arrêt doit être l'id PERMUTÉ de <|im_end|> (151645) :
+        # l'eos du config est l'id clair, jamais émis par le modèle obfusqué
+        eos_perm = perm[tok.eos_token_id]
         with torch.no_grad():
             out = model.generate(
                 input_ids, max_new_tokens=max_new_tokens,
-                do_sample=False, pad_token_id=tok.eos_token_id)
+                do_sample=False, eos_token_id=eos_perm,
+                pad_token_id=eos_perm)
         gen = out[0][input_ids.shape[1]:].tolist()
         gen = [unperm.get(i, i) for i in gen]
         outs.append(tok.decode(gen, skip_special_tokens=True).strip())
