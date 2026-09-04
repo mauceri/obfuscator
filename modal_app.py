@@ -33,9 +33,7 @@ import sys
 import modal
 
 MODELS_DIR = "/models"
-KEYS_DIR = "/keys"
 MODEL_VOL = "obfuscator-models"
-KEYS_VOL = "obfuscator-keys"
 SRC_MODEL = "Qwen/Qwen3-8B"          # source de la transformation
 MODEL_SUBDIR = "qwen3-14b-h128-a1-h02"   # 14B obfusqué servi (h>0, α_e=1,0)
 # (l'ancien "qwen3-8b-obf" était le h=0 — à ne PAS servir comme confidentiel)
@@ -88,12 +86,6 @@ SERVE_IMAGE = (
 )
 
 models_vol = modal.Volume.from_name(MODEL_VOL, create_if_missing=True)
-keys_vol = modal.Volume.from_name(KEYS_VOL, create_if_missing=False)
-# create_if_missing=False : le volume de clés ne doit JAMAIS être recréé
-# silencieusement (posture : clés côté client uniquement). Si une
-# transformation doit être relancée, recréer le volume explicitement puis
-# le supprimer après récupération des clés.
-
 try:
     API_SECRET = modal.Secret.from_name("aloepri-api-key")
 except modal.exception.NotFoundError:  # pragma: no cover
@@ -106,7 +98,7 @@ app = modal.App("obfuscator-aloepri")
     image=TRANSFORM_IMAGE,
     memory=TRANSFORM_MEMORY,
     ephemeral_disk=TRANSFORM_EPHEMERAL_DISK,
-    volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
+    volumes={MODELS_DIR: models_vol},
     timeout=3600,
     scaledown_window=300,
 )
@@ -125,10 +117,9 @@ def transform(
     """Reproduit la transformation AloePri sur le modèle source.
 
     Sortie : modèle obfusqué sous {MODELS_DIR}/{out_subdir} sur le Volume
-    `obfuscator-models` ; clés sous {KEYS_DIR}/{KEYS_FILENAME} sur le Volume
-    `obfuscator-keys` (jamais monté par `serve`/`isa_attack`/`verify`).
-    Retourne le chemin des clés et leur empreinte SHA-256 — à comparer côté
-    client après téléchargement.
+    `obfuscator-models`. Les clés (permutation Π) ne sont PAS écrites sur
+    Modal (posture stricte) : elles sont régénérées côté client par la seed
+    (`random.Random(seed).shuffle`).
 
     Variantes d'arc d'attaques (T2) : `obfuscate_attention=False` laisse les
     poids d'attention intacts ; `apply_permutation=False` garde les tables
@@ -139,8 +130,12 @@ def transform(
     from aloepri.transform_streaming import transform_streaming
 
     out_dir = os.path.join(MODELS_DIR, out_subdir)
-    keys_path = os.path.join(KEYS_DIR, KEYS_FILENAME)
-    keys = transform_streaming(
+    # clés NON persistées sur Modal : transform_streaming écrit le fichier
+    # localement dans le conteneur (chemin keys_path) uniquement pour la
+    # régénération interne ; on n'en garde que la seed (déterministe côté
+    # client). Le volume de clés a été supprimé (posture).
+    keys_path = os.path.join("/tmp", KEYS_FILENAME)
+    transform_streaming(
         model_name, out_dir, seed,
         alpha_e=alpha_e, alpha_h=alpha_h, beta=beta, zeta=zeta,
         keys_path=keys_path, rope_scaling=rope_scaling,
@@ -148,10 +143,6 @@ def transform(
         apply_permutation=apply_permutation,
     )
     models_vol.commit()
-    keys_vol.commit()
-    import hashlib
-    with open(keys_path, "rb") as f:
-        digest = hashlib.sha256(f.read()).hexdigest()
     return {
         "model_dir": out_dir,
         "keys_path": keys_path,
@@ -513,65 +504,15 @@ def isa_vocab_attack(
     return result
 
 
-@app.function(volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
+@app.function(volumes={MODELS_DIR: models_vol},
               scaledown_window=60)
 def diag():
-    """État des Volumes : contenu du modèle de service et des clés."""
-    for d in (MODELS_DIR, KEYS_DIR):
-        print(f"== {d} ==")
-        for root, _dirs, files in os.walk(d):
-            for fname in files:
-                path = os.path.join(root, fname)
-                print(f"  {path}  ({os.path.getsize(path) / 1e6:.1f} Mo)")
-    if os.path.exists(os.path.join(KEYS_DIR, KEYS_FILENAME)):
-        import hashlib
-        with open(os.path.join(KEYS_DIR, KEYS_FILENAME), "rb") as f:
-            print("keys sha256:",
-                  hashlib.sha256(f.read()).hexdigest())
+    """État du Volume des modèles (posture : pas de volume de clés)."""
+    for root, _dirs, files in os.walk(MODELS_DIR):
+        for fname in files:
+            path = os.path.join(root, fname)
+            print(f"  {path}  ({os.path.getsize(path) / 1e6:.1f} Mo)")
 
-
-@app.function(image=TRANSFORM_IMAGE, volumes={MODELS_DIR: models_vol,
-              "/poc": modal.Volume.from_name("aloepri-models", create_if_missing=False)},
-              scaledown_window=60)
-def compare_poc():
-    """Diagnostic : compare les poids du modèle obfusqué local (obfuscator-models)
-    avec le modèle POC (aloepri-models) — même structure attendue si les
-    transformations sont identiques (seed 0, alpha_e, beta)."""
-    import json
-    import torch
-    from safetensors import safe_open
-
-    poc = "/poc/qwen3-8b-obf"
-    obf = os.path.join(MODELS_DIR, MODEL_SUBDIR)
-    idx = json.load(open(os.path.join(poc, "model.safetensors.index.json")))
-    names = [
-        "model.embed_tokens.weight",
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.layers.0.self_attn.k_proj.weight",
-        "model.layers.0.self_attn.v_proj.weight",
-        "model.layers.0.self_attn.o_proj.weight",
-        "model.layers.0.mlp.gate_proj.weight",
-        "model.layers.0.mlp.down_proj.weight",
-        "model.layers.0.input_layernorm.weight",
-        "lm_head.weight",
-    ]
-    for name in names:
-        shard = idx["weight_map"].get(name)
-        if not shard:
-            print(f"{name}: introuvable dans l'index"); continue
-        with safe_open(os.path.join(poc, shard), framework="pt") as fp, \
-             safe_open(os.path.join(obf, shard), framework="pt") as fo:
-            p = fp.get_tensor(name); o = fo.get_tensor(name)
-        if p.shape != o.shape:
-            print(f"{name}: SHAPE {p.shape} vs {o.shape}"); continue
-        if torch.equal(p, o):
-            print(f"{name}: IDENTIQUE")
-        else:
-            d = float((p.float() - o.float()).abs().max())
-            print(f"{name}: DIFF max={d:.6g}")
-    pc = json.load(open(os.path.join(poc, "config.json")))
-    oc = json.load(open(os.path.join(obf, "config.json")))
-    print("config identiques:", pc == oc)
 
 @app.function(image=SERVE_IMAGE, scaledown_window=60)
 def serve_env():
@@ -740,7 +681,7 @@ def vma_attack(subset_size: int = 2000, seed: int = 0,
 
 @app.function(image=TRANSFORM_IMAGE, memory=131072,
               ephemeral_disk=TRANSFORM_EPHEMERAL_DISK,
-              volumes={MODELS_DIR: models_vol, KEYS_DIR: keys_vol},
+              volumes={MODELS_DIR: models_vol},
               timeout=14400, scaledown_window=300)
 def transform_chained(
     seed: int = 0,
@@ -798,13 +739,10 @@ def transform_chained(
     os.makedirs(out_dir, exist_ok=True)
     obf.to(torch.bfloat16).save_pretrained(out_dir)
 
-    keys_path = os.path.join(KEYS_DIR, KEYS_FILENAME)
-    with open(keys_path, "w") as f:
-        json.dump({k: ({str(a): int(b) for a, b in v.items()}
-                       if isinstance(v, dict) else v)
-                   for k, v in keys.items()}, f)
+    # clés NON persistées sur Modal (posture stricte) : la permutation est
+    # régénérée côté client par seed (`random.Random(seed).shuffle`) — le
+    # volume de clés a été supprimé. `keys` reste en mémoire (inutilisé).
     models_vol.commit()
-    keys_vol.commit()
 
     return {
         "out_subdir": out_subdir,
