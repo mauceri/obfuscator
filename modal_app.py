@@ -262,38 +262,21 @@ def verify(
     }
 
 
-@app.function(
-    image=SERVE_IMAGE,
-    gpu=GPU_SERVE,
-    volumes={MODELS_DIR: models_vol},
-    secrets=[API_SECRET] if API_SECRET else [],
-    timeout=3600,
-    scaledown_window=300,
-)
-@modal.asgi_app()
-def serve():
-    """Serveur HTTP du modèle obfusqué — posture STRICTE.
+def _make_serve_app(model_subdir):
+    """Construit l'app FastAPI d'un service obfusqué — posture STRICTE.
 
     Un seul endpoint, `POST /generate` : il reçoit des IDs de tokens PERMUTÉS
     (des nombres) et renvoie des IDs PERMUTÉS. Aucun tokenizer, aucune clé,
     aucun texte sur le serveur — la permutation du vocabulaire reste
-    exclusivement côté client.
-
-    Les paramètres de décodage optionnels (`repetition_penalty`,
-    `bad_words_ids`) sont opaques pour le serveur : ce sont des nombres
-    fournis par le client pour piloter `generate()` sans rien révéler.
-
-    `@modal.asgi_app()` : la fonction RETOURNE l'app FastAPI (le conteneur
-    est prêt dès qu'elle est retournée) — avec `@modal.web_server` il
-    faudrait lancer uvicorn en sous-processus et rendre la main (pattern
-    tiron), sinon la passerelle renvoie 303 tant que la fonction n'est pas
-    retournée."""
+    exclusivement côté client. `stop_token_id` (id PERMUTÉ de fin, ex.
+    <|im_end|>) est fourni par le client qui détient la clé.
+    """
     import torch
     from fastapi import FastAPI, Header, HTTPException
     from pydantic import BaseModel, Field
     from transformers import AutoModelForCausalLM
 
-    model_dir = os.path.join(MODELS_DIR, MODEL_SUBDIR)
+    model_dir = os.path.join(MODELS_DIR, model_subdir)
     model = AutoModelForCausalLM.from_pretrained(
         model_dir, dtype=torch.bfloat16).cuda()
     model.eval()
@@ -320,8 +303,7 @@ def serve():
 
     def _authorized(authorization: str | None) -> bool:
         # Fail-closed : sans clé attendue configurée (env `ALOEPRI_API_KEY`
-        # du Secret Modal `aloepri-api-key`), AUCUNE requête n'est acceptée —
-        # le Secret est requis, cf. README (posture de sécurité).
+        # du Secret Modal `aloepri-api-key`), AUCUNE requête n'est acceptée.
         expected = os.environ.get("ALOEPRI_API_KEY")
         if not expected:
             return False
@@ -360,6 +342,34 @@ def serve():
                                server_time_ms=(_time.time() - t0) * 1000)
 
     return fastapi_app
+
+
+@app.function(
+    image=SERVE_IMAGE,
+    gpu=GPU_SERVE,
+    volumes={MODELS_DIR: models_vol},
+    secrets=[API_SECRET] if API_SECRET else [],
+    timeout=3600,
+    scaledown_window=300,
+)
+@modal.asgi_app()
+def serve():
+    """Service du Qwen3-14B obfusqué (défaut, A100-40GB)."""
+    return _make_serve_app(MODEL_SUBDIR)
+
+
+@app.function(
+    image=SERVE_IMAGE,
+    gpu="L4",
+    volumes={MODELS_DIR: models_vol},
+    secrets=[API_SECRET] if API_SECRET else [],
+    timeout=3600,
+    scaledown_window=300,
+)
+@modal.asgi_app()
+def serve_8b():
+    """Service du Qwen3-8B obfusqué (léger — L4 24 Go suffisent)."""
+    return _make_serve_app("qwen3-8b-ft-h128-a1-h02")
 
 
 @app.function(
