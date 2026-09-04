@@ -32,6 +32,7 @@ Dépendances : requests, fastapi, uvicorn, transformers (venv scientifique).
 import argparse
 import json
 import os
+import re
 import time
 import uuid
 
@@ -56,7 +57,9 @@ class ClientCodec:
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list | None = None
 
 
 class ChatRequest(BaseModel):
@@ -65,6 +68,8 @@ class ChatRequest(BaseModel):
     max_tokens: int = 300
     temperature: float | None = None   # accepté, ignoré (greedy)
     stream: bool = False
+    tools: list | None = None          # function calling (OpenAI format)
+    tool_choice: str | None = None     # accepté ; "auto" par défaut (greedy)
 
 
 def make_app(modal_url, api_key, codec, tokenizer, model_name):
@@ -86,10 +91,13 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
             raise HTTPException(status_code=400,
                                 detail="streaming non supporté (greedy)")
         # 1. chat template non-thinking → texte → IDs CLAIRS
+        #    (tools éventuels : le template Qwen3 insère les signatures dans
+        #    <tools>…</tools> et attend <tool_call>…</tool_call> en réponse)
+        raw_messages = [{"role": m.role, "content": m.content}
+                        for m in req.messages]
         templated = tokenizer.apply_chat_template(
-            [{"role": m.role, "content": m.content} for m in req.messages],
-            tokenize=False, add_generation_prompt=True,
-            enable_thinking=False,
+            raw_messages, tools=req.tools, tokenize=False,
+            add_generation_prompt=True, enable_thinking=False,
         )
         clear_ids = tokenizer(templated)["input_ids"]
         # 2. permutation locale (secret côté client)
@@ -117,20 +125,43 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
         out_ids = resp.json()["output_ids"]
         # 4. dépermutation + décodage côté client
         completion = out_ids[len(permuted):]
-        content = tokenizer.decode(
+        text = tokenizer.decode(
             [codec.unpermute[i] for i in completion],
             skip_special_tokens=True).strip()
+
+        # 5. tool calling : le modèle répond <tool_call>{json}</tool_call>
+        tool_calls = []
+        for bloc in re.findall(r"<tool_call>(.*?)</tool_call>", text,
+                               re.DOTALL):
+            try:
+                tc = json.loads(bloc.strip())
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:12]}",
+                    "type": "function",
+                    "function": {"name": tc.get("name", ""),
+                                 "arguments": json.dumps(
+                                     tc.get("arguments", {}),
+                                     ensure_ascii=False)},
+                })
+            except json.JSONDecodeError:
+                continue
+        if tool_calls:
+            content = None
+            finish = "tool_calls"
+            message = {"role": "assistant", "content": None,
+                       "tool_calls": tool_calls}
+        else:
+            content = text
+            finish = "stop"
+            message = {"role": "assistant", "content": content}
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": req.model or model_name,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }],
+            "choices": [{"index": 0, "message": message,
+                         "finish_reason": finish}],
             "usage": {
                 "prompt_tokens": len(clear_ids),
                 "completion_tokens": len(completion),
