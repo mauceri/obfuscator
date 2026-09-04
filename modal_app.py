@@ -37,9 +37,10 @@ KEYS_DIR = "/keys"
 MODEL_VOL = "obfuscator-models"
 KEYS_VOL = "obfuscator-keys"
 SRC_MODEL = "Qwen/Qwen3-8B"          # source de la transformation
-MODEL_SUBDIR = "qwen3-8b-obf"         # sous-répertoire sur le Volume service
+MODEL_SUBDIR = "qwen3-14b-h128-a1-h02"   # 14B obfusqué servi (h>0, α_e=1,0)
+# (l'ancien "qwen3-8b-obf" était le h=0 — à ne PAS servir comme confidentiel)
 KEYS_FILENAME = "obfuscation_keys.json"
-GPU_SERVE = "L4"                       # 24 Go VRAM ; A100-40GB si contexte long
+GPU_SERVE = "A100-40GB"                 # le 14B obfusqué fait ~30 Go > L4 (24 Go)
 TRANSFORM_MEMORY = 12288               # MiB garantis pour transform()/verify()
 # Disque éphémère Modal : minimum 512 GiB (524288 MiB), jusqu'à 3 TiB. Le
 # cache HF (16 Go) + la sortie (16 Go) tiennent largement dans 512 GiB.
