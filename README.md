@@ -5,6 +5,7 @@ Modal pour les étapes lourdes. Dépôt autonome : zéro dépendance à Secretar
 (POC utilisé uniquement comme référence).
 
 - [Installation / démo client](docs/installation-demo.md)
+- [Runbook de reprise après sinistre](docs/DISASTER-RECOVERY.md)
 - [Rotation des clés (2 niveaux)](docs/rotation-cles.md)
 - [Présentation client (Marp, public avocats)](presentations/demo-avocats.md)
 
