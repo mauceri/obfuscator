@@ -151,13 +151,14 @@ curl -H "Authorization: Bearer $(cat ~/.aloepri-api-key)" \
 Venv scientifique requis (`fastapi`, `uvicorn`, `requests`, `transformers`) —
 sinon : `pip install fastapi "uvicorn[standard]" requests transformers`.
 
-Unité systemd utilisateur (×2, port 8001 → 14B, 8002 → 8B) :
-`~/.config/systemd/user/obfuscator-proxy.service` et
-`obfuscator-proxy-8b.service` — cf. `docs/acces-openai.md` pour le contenu
-exact (ExecStart = `tools/openai_proxy.py --keys artifacts/... --url
-https://...-serve...modal.run --port 8001/8002`).
+Unités systemd utilisateur **versionnées dans le repo** (`systemd/`) :
+`obfuscator-proxy.service` (port 8001 → 14B) et `obfuscator-proxy-8b.service`
+(port 8002 → 8B). Procédure d'installation complète :
+`systemd/INSTALL.md` (copie vers `~/.config/systemd/user/`, fichier
+`proxy.env`, chemins à adapter).
 
 ```bash
+cp systemd/obfuscator-proxy.service systemd/obfuscator-proxy-8b.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now obfuscator-proxy obfuscator-proxy-8b
 # exposition tailnet (ports HTTPS dédiés, 443 déjà pris)

@@ -1,0 +1,34 @@
+# ============================================================
+# Unité systemd (utilisateur) du proxy OpenAI local AloePri.
+# INSTALLATION :
+#   1. copier ce fichier vers ~/.config/systemd/user/
+#   2. créer ~/.config/obfuscator/proxy.env :
+#        ALOEPRI_API_KEY=<clé du service Modal>   (chmod 600)
+#   3. adapter les chemins ExecStart si le repo ou le venv diffèrent
+#      (le venv scientifique peut être remplacé par <repo>/.venv)
+#   4. systemctl --user daemon-reload
+#      systemctl --user enable --now obfuscator-proxy
+# Voir docs/acces-openai.md et docs/DISASTER-RECOVERY.md (§8).
+# ============================================================
+
+[Unit]
+Description=Proxy OpenAI local vers le Qwen3-8B obfusqué servi sur Modal (L4)
+Documentation=file:///home/mauceric/obfuscator/docs/acces-openai.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/obfuscator/proxy.env
+ExecStart=%h/Secretarius/Wiki_LM/.venv/bin/python %h/obfuscator/tools/openai_proxy.py \
+    --keys %h/obfuscator/artifacts/obfuscation_keys.json \
+    --url https://mauceri--obfuscator-aloepri-serve-8b.modal.run \
+    --model-name qwen3-8b-ft-h128-a1-h02 \
+    --port 8002
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
