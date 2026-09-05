@@ -1,0 +1,7 @@
+torch>=2.0
+transformers>=4.56
+numpy
+scipy
+fastapi
+uvicorn
+requests
