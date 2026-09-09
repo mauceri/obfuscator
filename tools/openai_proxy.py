@@ -105,7 +105,10 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
         # 3. appel Modal /generate : des nombres, rien d'autre
         payload = {
             "input_ids": permuted,
-            "max_new_tokens": req.max_tokens,
+            # Le serveur Modal rejette (422) toute valeur > 2048 (GenerateRequest,
+            # modal_app.py) — clamp défensif ici plutôt que de laisser l'erreur
+            # de validation remonter telle quelle à l'appelant.
+            "max_new_tokens": min(req.max_tokens, 2048),
             "repetition_penalty": REPETITION_PENALTY,
             # <think> interdit, exprimé dans l'espace permuté (opaque au
             # serveur : un simple id à ne pas émettre)
