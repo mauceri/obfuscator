@@ -184,6 +184,12 @@ def main():
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-14B")
     ap.add_argument("--model-name", default="qwen3-14b-h128-a1-h02")
     ap.add_argument("--port", type=int, default=8001)
+    # Défaut inchangé (loopback strict). Un sandbox Docker (network: bridge)
+    # ne peut pas atteindre 127.0.0.1 de l'hôte — pour lui, --host doit être
+    # l'IP de la passerelle bridge (ex. 172.17.0.1, "ip addr show docker0"),
+    # jamais 0.0.0.0 (exposerait aussi au LAN/Tailscale, le proxy n'authentifie
+    # aucun appelant local).
+    ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
     with open(args.keys) as f:
@@ -193,10 +199,10 @@ def main():
                         keys["vocab_unpermute"], tokenizer)
     app = make_app(args.url, args.api_key, codec, tokenizer, args.model_name)
     print(f"[proxy] OpenAI-compatible local : "
-          f"http://127.0.0.1:{args.port}/v1/chat/completions")
+          f"http://{args.host}:{args.port}/v1/chat/completions")
     print(f"[proxy] modèle '{args.model_name}' — clés et tokenizer LOCAUX, "
           "Modal ne reçoit que des IDs permutés")
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

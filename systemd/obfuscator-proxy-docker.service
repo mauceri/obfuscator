@@ -1,0 +1,43 @@
+# ============================================================
+# Unité systemd (utilisateur) du proxy OpenAI local AloePri —
+# variante accessible depuis les sandboxes Docker (network: bridge)
+# de sanroque, ex. l'agent d'ingestion Wiki_LM.
+#
+# Écoute sur l'IP de la passerelle docker0 (172.17.0.1), PAS 0.0.0.0 :
+# le proxy n'authentifie aucun appelant local, une exposition plus
+# large (LAN/Tailscale) donnerait un accès gratuit au modèle payant.
+# Coexiste avec obfuscator-proxy.service (127.0.0.1:8001, pour les
+# clients de l'hôte lui-même) — interfaces différentes, même port,
+# pas de conflit.
+#
+# INSTALLATION :
+#   1. copier ce fichier vers ~/.config/systemd/user/
+#   2. réutiliser ~/.config/obfuscator/proxy.env (ALOEPRI_API_KEY)
+#   3. vérifier l'IP de docker0 (`ip addr show docker0`) — l'adapter
+#      ci-dessous si elle diffère de 172.17.0.1
+#   4. systemctl --user daemon-reload
+#      systemctl --user enable --now obfuscator-proxy-docker
+# Voir docs/acces-openai.md.
+# ============================================================
+
+[Unit]
+Description=Proxy OpenAI local (passerelle Docker) vers le Qwen3-14B obfusqué servi sur Modal
+Documentation=file:///home/mauceric/obfuscator/docs/acces-openai.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/obfuscator/proxy.env
+ExecStart=%h/Secretarius/Wiki_LM/.venv/bin/python %h/obfuscator/tools/openai_proxy.py \
+    --keys %h/obfuscator/artifacts/obfuscation_keys.json \
+    --url https://mauceri--obfuscator-aloepri-serve.modal.run \
+    --host 172.17.0.1 \
+    --port 8001
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
