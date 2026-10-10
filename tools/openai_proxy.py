@@ -39,6 +39,7 @@ import uuid
 import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
@@ -66,10 +67,30 @@ class ChatRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage]
     max_tokens: int = 300
+    max_completion_tokens: int | None = None   # nom récent (OpenClaw), prioritaire
     temperature: float | None = None   # accepté, ignoré (greedy)
     stream: bool = False
+    stream_options: dict | None = None
     tools: list | None = None          # function calling (OpenAI format)
     tool_choice: str | None = None     # accepté ; "auto" par défaut (greedy)
+
+
+def _sse(ident, model, message, finish, usage, avec_usage):
+    def bloc(choices, **extra):
+        return "data: " + json.dumps({"id": ident, "object": "chat.completion.chunk",
+                                      "created": int(time.time()), "model": model,
+                                      "choices": choices, **extra},
+                                     ensure_ascii=False) + "\n\n"
+    delta = {"role": "assistant"}
+    if message.get("tool_calls"):
+        delta["tool_calls"] = [dict(tc, index=i) for i, tc in enumerate(message["tool_calls"])]
+    else:
+        delta["content"] = message["content"]
+    yield bloc([{"index": 0, "delta": delta, "finish_reason": None}])
+    yield bloc([{"index": 0, "delta": {}, "finish_reason": finish}])
+    if avec_usage:
+        yield bloc([], usage=usage)
+    yield "data: [DONE]\n\n"
 
 
 def make_app(modal_url, api_key, codec, tokenizer, model_name):
@@ -87,13 +108,12 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
 
     @app.post("/v1/chat/completions")
     def chat(req: ChatRequest):
-        if req.stream:
-            raise HTTPException(status_code=400,
-                                detail="streaming non supporté (greedy)")
         # 1. chat template non-thinking → texte → IDs CLAIRS
         #    (tools éventuels : le template Qwen3 insère les signatures dans
         #    <tools>…</tools> et attend <tool_call>…</tool_call> en réponse)
-        raw_messages = [{"role": m.role, "content": m.content}
+        # tool_calls / tool_call_id gardés : sans eux, le modèle ne voit plus
+        # quels outils il a déjà appelés.
+        raw_messages = [m.model_dump(exclude_none=True) | {"content": m.content or ""}
                         for m in req.messages]
         templated = tokenizer.apply_chat_template(
             raw_messages, tools=req.tools, tokenize=False,
@@ -108,7 +128,7 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
             # Le serveur Modal rejette (422) toute valeur > 2048 (GenerateRequest,
             # modal_app.py) — clamp défensif ici plutôt que de laisser l'erreur
             # de validation remonter telle quelle à l'appelant.
-            "max_new_tokens": min(req.max_tokens, 2048),
+            "max_new_tokens": min(req.max_completion_tokens or req.max_tokens, 2048),
             "repetition_penalty": REPETITION_PENALTY,
             # <think> interdit, exprimé dans l'espace permuté (opaque au
             # serveur : un simple id à ne pas émettre)
@@ -159,19 +179,28 @@ def make_app(modal_url, api_key, codec, tokenizer, model_name):
             finish = "stop"
             message = {"role": "assistant", "content": content}
 
+        ident = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+        usage = {
+            "prompt_tokens": len(clear_ids),
+            "completion_tokens": len(completion),
+            "total_tokens": len(clear_ids) + len(completion),
+            "server_time_ms": server_time_ms,
+        }
+        if req.stream:
+            # Pas de vrai streaming (génération gloutonne d'un bloc) : la réponse
+            # complète est renvoyée en SSE, car OpenClaw impose stream=true.
+            return StreamingResponse(
+                _sse(ident, req.model or model_name, message, finish, usage,
+                     bool((req.stream_options or {}).get("include_usage"))),
+                media_type="text/event-stream")
         return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
+            "id": ident,
             "object": "chat.completion",
             "created": int(time.time()),
             "model": req.model or model_name,
             "choices": [{"index": 0, "message": message,
                          "finish_reason": finish}],
-            "usage": {
-                "prompt_tokens": len(clear_ids),
-                "completion_tokens": len(completion),
-                "total_tokens": len(clear_ids) + len(completion),
-                "server_time_ms": server_time_ms,
-            },
+            "usage": usage,
         }
 
     return app
